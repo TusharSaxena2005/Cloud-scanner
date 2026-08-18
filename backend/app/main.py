@@ -11,9 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from app.models.schemas import (
     CheckLbPermissionsRequest,
     CheckLbPermissionsResponse,
-    PermissionCheckResult,
     PermissionManifestEntry,
     PermissionManifestResponse,
+    ScanResponse,
     ServiceAccountInfo,
 )
 from app.config import settings
@@ -23,6 +23,7 @@ from app.services.gcp_credentials import (
 )
 from app.services.lb_permission_checker import LbPermissionChecker
 from app.services.permission_preflight import DEFAULT_MANIFEST_PATH, load_permission_manifest
+from app.services.scan_orchestrator import ScanOrchestrator, build_preflight_response
 
 app = FastAPI(
     title="CloudScanner GCP LB Permission Checker",
@@ -84,24 +85,23 @@ def get_permission_manifest() -> PermissionManifestResponse:
 
 
 def _build_check_response(result) -> CheckLbPermissionsResponse:
-    return CheckLbPermissionsResponse(
-        project_id=result.project_id,
-        service_account_email=result.service_account_email,
-        all_permissions_granted=result.all_permissions_granted,
-        permissions=[
-            PermissionCheckResult(
-                permission=item["permission"],
-                status=item["status"],
-                scope=item["scope"],
-                resource=item["resource"],
-            )
-            for item in result.permissions
-        ],
-        missing_permissions=result.missing_permissions,
-        invalid_permissions=result.invalid_permissions,
-        message=result.message,
-        logs=result.logs,
-    )
+    return build_preflight_response(result)
+
+
+@app.get("/api/v1/scan/{project_id}", response_model=ScanResponse)
+def scan_project(project_id: str) -> ScanResponse:
+    if not 6 <= len(project_id) <= 30:
+        raise HTTPException(status_code=400, detail="Invalid project ID length.")
+
+    try:
+        return ScanOrchestrator().run(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to run scan: {exc}",
+        ) from exc
 
 
 @app.post("/api/check-lb-permissions", response_model=CheckLbPermissionsResponse)

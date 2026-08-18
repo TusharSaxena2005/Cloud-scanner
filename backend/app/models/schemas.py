@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 
 PermissionStatusValue = Literal["GRANTED", "DENIED", "INVALID"]
+ScanStatusValue = Literal["completed", "blocked", "failed"]
 
 
 class CheckLbPermissionsRequest(BaseModel):
@@ -48,4 +49,37 @@ class CheckLbPermissionsResponse(BaseModel):
     missing_permissions: list[str]
     invalid_permissions: list[str]
     message: str
+    logs: list[str] = Field(default_factory=list)
+
+
+class ResourceNodeResponse(BaseModel):
+    resource_type: str
+    name: str
+    scope: str
+    self_link: str | None = None
+    details: dict[str, object] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class BackendServiceHierarchyResponse(BaseModel):
+    backend_service: ResourceNodeResponse
+    security_policy: ResourceNodeResponse | None = None
+
+
+class LoadBalancerHierarchyResponse(BaseModel):
+    forwarding_rule: ResourceNodeResponse
+    target_proxy: ResourceNodeResponse | None = None
+    url_map: ResourceNodeResponse | None = None
+    backend_services: list[BackendServiceHierarchyResponse] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ScanResponse(BaseModel):
+    project_id: str
+    status: ScanStatusValue
+    message: str
+    service_account_email: str
+    preflight: CheckLbPermissionsResponse
+    project: ResourceNodeResponse | None = None
+    load_balancers: list[LoadBalancerHierarchyResponse] = Field(default_factory=list)
     logs: list[str] = Field(default_factory=list)
