@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CloudScanner — GCP LB Permissions</title>
+    <link rel="stylesheet" href="/css/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="header">
+        <div class="logo">CloudScanner</div>
+        <p class="subtitle">Check if your service account has the required GCP permissions</p>
+      </header>
+
+      <main class="card">
+        <form id="check-form" class="form">
+          <label for="project-id">GCP Project ID</label>
+          <div class="input-row">
+            <input
+              id="project-id"
+              name="project_id"
+              type="text"
+              placeholder="my-gcp-project"
+              autocomplete="off"
+              required
+              pattern="^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+              title="Lowercase letters, numbers, and hyphens. 6–30 characters."
+            />
+            <button id="submit-btn" type="submit">Check Permissions</button>
+          </div>
+          <div id="activity-log" class="activity-log hidden" aria-live="polite">
+            <div class="activity-log-header">
+              <span>Activity log</span>
+              <span id="activity-status" class="activity-status">Idle</span>
+            </div>
+            <pre id="activity-log-body" class="activity-log-body"></pre>
+          </div>
+          <p id="sa-hint" class="hint">Loading configured service account...</p>
+        </form>
+
+        <div id="error-box" class="error-box hidden" role="alert"></div>
+
+        <section id="results" class="results hidden">
+          <div class="status-row">
+            <span id="status-badge" class="badge"></span>
+            <p id="result-message" class="result-message"></p>
+          </div>
+
+          <dl class="meta">
+            <div>
+              <dt>Project</dt>
+              <dd id="meta-project"></dd>
+            </div>
+            <div>
+              <dt>Service Account</dt>
+              <dd id="meta-sa"></dd>
+            </div>
+          </dl>
+
+          <section class="section">
+            <h2>Permissions</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Permission</th>
+                    <th>Scope</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="permissions-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="missing-section" class="section hidden">
+            <h2>Missing Permissions</h2>
+            <ul id="missing-list" class="missing-list"></ul>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/js/app.js"></script>
+  </body>
+</html>

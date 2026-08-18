@@ -1,0 +1,33 @@
+permissions:
+  - permission: resourcemanager.projects.get
+    scope: project
+
+  - permission: compute.forwardingRules.list
+    scope: project
+  - permission: compute.forwardingRules.get
+    scope: project
+
+  - permission: compute.targetHttpProxies.list
+    scope: project
+  - permission: compute.targetHttpProxies.get
+    scope: project
+
+  - permission: compute.targetHttpsProxies.list
+    scope: project
+  - permission: compute.targetHttpsProxies.get
+    scope: project
+
+  - permission: compute.urlMaps.list
+    scope: project
+  - permission: compute.urlMaps.get
+    scope: project
+
+  - permission: compute.backendServices.list
+    scope: project
+  - permission: compute.backendServices.get
+    scope: project
+
+  - permission: compute.securityPolicies.list
+    scope: project
+  - permission: compute.securityPolicies.get
+    scope: project
