@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -11,7 +12,8 @@ from app.services.gcp_resource_utils import parse_gcp_self_link, resource_scope_
 LogCallback = Callable[[str], None]
 
 EXTERNAL_LB_SCHEMES = {"EXTERNAL", "EXTERNAL_MANAGED"}
-HTTP_PROXY_TYPES = {"targetHttpProxies", "targetHttpsProxies"}
+HTTP_PROXY_TYPES = ("targetHttpProxies", "targetHttpsProxies")
+INTERNAL_LB_SCHEMES = {"INTERNAL", "INTERNAL_MANAGED", "INTERNAL_SELF_MANAGED"}
 
 
 @dataclass
@@ -119,37 +121,90 @@ class ExternalLbScanner:
             credentials=self._credentials
         )
         global_request = compute_v1.ListGlobalForwardingRulesRequest(project=project_id)
+        global_total = 0
         for rule in global_client.list(request=global_request):
-            if self._is_public_external_rule(rule):
+            global_total += 1
+            matched, reason = self._match_public_external_rule(rule)
+            if matched:
                 rules.append(rule)
+                self._log(f"Matched global forwarding rule '{rule.name}'")
+            else:
+                self._log(
+                    f"Skipped global forwarding rule '{rule.name}': {reason}"
+                )
+
+        self._log(
+            f"Global forwarding rules: {global_total} listed, {len(rules)} matched so far"
+        )
 
         self._log("Listing regional forwarding rules")
         regions_client = compute_v1.RegionsClient(credentials=self._credentials)
-        regional_client = compute_v1.ForwardingRulesClient(credentials=self._credentials)
         regions_request = compute_v1.ListRegionsRequest(project=project_id)
-        for region in regions_client.list(request=regions_request):
+        regions = [region.name for region in regions_client.list(request=regions_request)]
+        self._log(f"Scanning {len(regions)} region(s) for forwarding rules")
+
+        regional_total = 0
+        regional_matched = 0
+        def list_regional_rules(region_name: str) -> tuple[str, list[compute_v1.ForwardingRule]]:
+            client = compute_v1.ForwardingRulesClient(credentials=self._credentials)
             regional_request = compute_v1.ListForwardingRulesRequest(
                 project=project_id,
-                region=region.name,
+                region=region_name,
             )
-            for rule in regional_client.list(request=regional_request):
-                if self._is_public_external_rule(rule):
-                    rules.append(rule)
+            return region_name, list(client.list(request=regional_request))
 
+        completed_regions = 0
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(list_regional_rules, region): region for region in regions
+            }
+            for future in as_completed(futures):
+                region_name = futures[future]
+                completed_regions += 1
+                try:
+                    _, regional_rules = future.result()
+                except google_exceptions.GoogleAPIError as exc:
+                    self._log(f"Failed to list forwarding rules in '{region_name}': {exc}")
+                    continue
+
+                if regional_rules:
+                    self._log(
+                        f"Region '{region_name}': found {len(regional_rules)} forwarding rule(s) "
+                        f"({completed_regions}/{len(regions)} regions checked)"
+                    )
+
+                for rule in regional_rules:
+                    regional_total += 1
+                    matched, reason = self._match_public_external_rule(rule)
+                    if matched:
+                        rules.append(rule)
+                        regional_matched += 1
+                        self._log(f"Matched regional forwarding rule '{rule.name}' ({region_name})")
+                    elif rule.load_balancing_scheme or rule.target:
+                        self._log(
+                            f"Skipped regional forwarding rule '{rule.name}' ({region_name}): {reason}"
+                        )
+
+        self._log(
+            f"Regional forwarding rules: {regional_total} listed, {regional_matched} matched"
+        )
         return rules
 
     @staticmethod
-    def _is_public_external_rule(rule: compute_v1.ForwardingRule) -> bool:
+    def _match_public_external_rule(
+        rule: compute_v1.ForwardingRule,
+    ) -> tuple[bool, str]:
         scheme = (rule.load_balancing_scheme or "").upper()
+        if scheme in INTERNAL_LB_SCHEMES:
+            return False, f"internal scheme '{scheme}'"
         if scheme not in EXTERNAL_LB_SCHEMES:
-            return False
+            return False, f"unsupported scheme '{scheme or 'unknown'}'"
 
         target = rule.target or ""
         if not any(proxy_type in target for proxy_type in HTTP_PROXY_TYPES):
-            return False
+            return False, "target is not an HTTP/HTTPS proxy"
 
-        ip_address = getattr(rule, "IPAddress", None) or getattr(rule, "ip_address", None)
-        return bool(ip_address)
+        return True, ""
 
     def _build_hierarchy(
         self,

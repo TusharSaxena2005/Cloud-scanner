@@ -104,6 +104,42 @@ def scan_project(project_id: str) -> ScanResponse:
         ) from exc
 
 
+@app.get("/api/v1/scan/{project_id}/stream")
+def scan_project_stream(project_id: str) -> StreamingResponse:
+    if not 6 <= len(project_id) <= 30:
+        raise HTTPException(status_code=400, detail="Invalid project ID length.")
+
+    log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def on_log(message: str) -> None:
+        log_queue.put(("log", message))
+
+    def run_scan() -> None:
+        try:
+            result = ScanOrchestrator().run(project_id, on_log=on_log)
+            log_queue.put(("result", result))
+        except ValueError as exc:
+            log_queue.put(("error", str(exc)))
+        except Exception as exc:
+            log_queue.put(("error", f"Failed to run scan: {exc}"))
+
+    threading.Thread(target=run_scan, daemon=True).start()
+
+    def event_stream():
+        while True:
+            event_type, payload = log_queue.get()
+            if event_type == "log":
+                yield f"data: {json.dumps({'type': 'log', 'message': payload})}\n\n"
+            elif event_type == "result":
+                yield f"data: {json.dumps({'type': 'result', 'data': payload.model_dump()})}\n\n"
+                break
+            elif event_type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': payload})}\n\n"
+                break
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.post("/api/check-lb-permissions", response_model=CheckLbPermissionsResponse)
 def check_lb_permissions(body: CheckLbPermissionsRequest) -> CheckLbPermissionsResponse:
     try:

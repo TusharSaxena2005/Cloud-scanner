@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from app.models.schemas import (
     BackendServiceHierarchyResponse,
     CheckLbPermissionsResponse,
@@ -13,6 +15,7 @@ from app.services.external_lb_scanner import (
     ScanResult,
 )
 from app.services.lb_permission_checker import LbPermissionChecker, LbPermissionCheckResult
+from app.services.permission_preflight import LogCallback
 
 
 def build_preflight_response(
@@ -74,11 +77,13 @@ def _hierarchy_to_response(hierarchy: LoadBalancerHierarchy) -> LoadBalancerHier
 
 
 class ScanOrchestrator:
-    def run(self, project_id: str) -> ScanResponse:
+    def run(self, project_id: str, on_log: LogCallback | None = None) -> ScanResponse:
         logs: list[str] = []
 
         def emit(message: str) -> None:
             logs.append(message)
+            if on_log is not None:
+                on_log(message)
 
         permission_checker = LbPermissionChecker()
         preflight_result = permission_checker.check(project_id, on_log=emit)
