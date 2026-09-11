@@ -3,7 +3,7 @@ import json
 import queue
 import threading
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,7 @@ from app.models.schemas import (
     ServiceAccountInfo,
 )
 from app.config import settings
+from app.auth import router as auth_router, require_scanner_user
 from app.services.gcp_credentials import (
     load_scanner_credentials,
     resolve_credentials_identity,
@@ -31,22 +32,26 @@ app = FastAPI(
     version="1.0.0",
 )
 
-FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+app.include_router(auth_router)
+
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-if FRONTEND_DIR.exists():
-    app.mount("/css", StaticFiles(directory=FRONTEND_DIR / "css"), name="css")
-    app.mount("/js", StaticFiles(directory=FRONTEND_DIR / "js"), name="js")
+if (FRONTEND_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
 
 
 @app.get("/")
 def serve_frontend() -> FileResponse:
+    if not (FRONTEND_DIR / "index.html").exists():
+        raise HTTPException(status_code=503, detail="Frontend build missing. Run npm install and npm run build in frontend, then restart the backend.")
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
@@ -55,7 +60,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/service-account", response_model=ServiceAccountInfo)
+@app.get("/api/service-account", response_model=ServiceAccountInfo, dependencies=[Depends(require_scanner_user)])
 def get_service_account() -> ServiceAccountInfo:
     try:
         credentials = load_scanner_credentials()
@@ -71,7 +76,7 @@ def get_service_account() -> ServiceAccountInfo:
     )
 
 
-@app.get("/api/permissions/manifest", response_model=PermissionManifestResponse)
+@app.get("/api/permissions/manifest", response_model=PermissionManifestResponse, dependencies=[Depends(require_scanner_user)])
 def get_permission_manifest() -> PermissionManifestResponse:
     manifest_path = settings.permission_manifest_path or DEFAULT_MANIFEST_PATH
     manifest = load_permission_manifest(manifest_path)
@@ -88,7 +93,7 @@ def _build_check_response(result) -> CheckLbPermissionsResponse:
     return build_preflight_response(result)
 
 
-@app.get("/api/v1/scan/{project_id}", response_model=ScanResponse)
+@app.get("/api/v1/scan/{project_id}", response_model=ScanResponse, dependencies=[Depends(require_scanner_user)])
 def scan_project(project_id: str) -> ScanResponse:
     if not 6 <= len(project_id) <= 30:
         raise HTTPException(status_code=400, detail="Invalid project ID length.")
@@ -104,7 +109,7 @@ def scan_project(project_id: str) -> ScanResponse:
         ) from exc
 
 
-@app.get("/api/v1/scan/{project_id}/stream")
+@app.get("/api/v1/scan/{project_id}/stream", dependencies=[Depends(require_scanner_user)])
 def scan_project_stream(project_id: str) -> StreamingResponse:
     if not 6 <= len(project_id) <= 30:
         raise HTTPException(status_code=400, detail="Invalid project ID length.")
@@ -140,7 +145,7 @@ def scan_project_stream(project_id: str) -> StreamingResponse:
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/api/check-lb-permissions", response_model=CheckLbPermissionsResponse)
+@app.post("/api/check-lb-permissions", response_model=CheckLbPermissionsResponse, dependencies=[Depends(require_scanner_user)])
 def check_lb_permissions(body: CheckLbPermissionsRequest) -> CheckLbPermissionsResponse:
     try:
         checker = LbPermissionChecker()
@@ -156,7 +161,7 @@ def check_lb_permissions(body: CheckLbPermissionsRequest) -> CheckLbPermissionsR
     return _build_check_response(result)
 
 
-@app.post("/api/check-lb-permissions/stream")
+@app.post("/api/check-lb-permissions/stream", dependencies=[Depends(require_scanner_user)])
 def check_lb_permissions_stream(body: CheckLbPermissionsRequest) -> StreamingResponse:
     log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 

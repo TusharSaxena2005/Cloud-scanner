@@ -19,7 +19,9 @@ const listeners = new Set();
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? { ...defaultState, ...JSON.parse(raw) } : { ...defaultState };
+    const saved = raw ? { ...defaultState, ...JSON.parse(raw) } : { ...defaultState };
+    if (["checking", "scanning"].includes(saved.scanStatus)) saved.scanStatus = "idle";
+    return saved;
   } catch {
     return { ...defaultState };
   }
@@ -54,7 +56,7 @@ export function subscribe(listener) {
 
 export function patchState(partial) {
   state = { ...state, ...partial };
-  persist();
+  try { persist(); } catch { /* Keep the app usable when storage is full or unavailable. */ }
   listeners.forEach((listener) => listener(state));
 }
 
@@ -70,13 +72,13 @@ export function flattenBackends(scanResult) {
 
     if (!lb.backend_services?.length) {
       rows.push({
-        project: projectId,
+        project: lb.project_id || projectId,
         loadBalancer: lbName,
         forwardingRule,
         backendService: "—",
         cloudArmorPolicy: "No Policy",
         status: "UNPROTECTED",
-        lastDetected: scanResult.lastScanTime || new Date().toISOString(),
+        lastDetected: lb.lastScanTime || scanResult.lastScanTime || new Date().toISOString(),
         hierarchy: lb,
         backendNode: null,
       });
@@ -89,13 +91,13 @@ export function flattenBackends(scanResult) {
       const hasPolicy = policy && !policy.error && policy.name;
 
       rows.push({
-        project: projectId,
+        project: lb.project_id || projectId,
         loadBalancer: lbName,
         forwardingRule,
         backendService: backend?.name || "unknown",
         cloudArmorPolicy: hasPolicy ? policy.name : "No Policy",
         status: hasPolicy ? "PROTECTED" : "UNPROTECTED",
-        lastDetected: scanResult.lastScanTime || new Date().toISOString(),
+        lastDetected: lb.lastScanTime || scanResult.lastScanTime || new Date().toISOString(),
         hierarchy: lb,
         backendNode: entry,
       });
@@ -118,4 +120,14 @@ export function scanSummary(scanResult) {
     unprotectedBackends: backends.length - protectedCount,
     totalPublicBackends: backends.length,
   };
+}
+
+let sessionEpoch = 0;
+export const getSessionEpoch = () => sessionEpoch;
+
+export function resetState() {
+  sessionEpoch += 1;
+  state = { ...defaultState };
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* Storage may be disabled. */ }
+  listeners.forEach(listener => listener(state));
 }

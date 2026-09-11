@@ -1,0 +1,24 @@
+{
+  "name": "cloud-armor-scanner",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^30.0.1",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.0"
+  }
+}

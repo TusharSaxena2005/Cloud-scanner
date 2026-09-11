@@ -1,0 +1,32 @@
+import React from 'react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import Auth from './Auth.jsx';
+import { authenticate } from './api.js';
+vi.mock('./api.js', () => ({ authenticate: vi.fn() }));
+afterEach(cleanup);
+test('login allows toggling password visibility without submitting', () => {
+  render(<Auth mode="login" />);
+  const password = screen.getByLabelText('Password');
+  expect(password.type).toBe('password');
+  fireEvent.click(screen.getByRole('button', { name: 'Show password' }));
+  expect(password.type).toBe('text');
+  expect(screen.queryByRole('status')).toBeNull();
+  expect(screen.getByText('Create an account').getAttribute('href')).toBe('#/signup');
+});
+test('signup validates matching passwords and authenticates with the backend', async () => {
+  const onAuthenticated = vi.fn();
+  authenticate.mockResolvedValue({ user: { name: 'Test User' } });
+  const { container } = render(<Auth mode="signup" onAuthenticated={onAuthenticated} />);
+  fireEvent.change(screen.getByLabelText('Full name'), { target: { value: 'Test User' } });
+  fireEvent.change(screen.getByLabelText('Email address'), { target: { value: 'test@example.com' } });
+  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'test-password' } });
+  const confirm = screen.getByLabelText('Confirm password');
+  fireEvent.change(confirm, { target: { value: 'different-password' } });
+  fireEvent.submit(container.querySelector('form'));
+  expect(confirm.validationMessage).toBe('Passwords must match.');
+  fireEvent.change(confirm, { target: { value: 'test-password' } });
+  fireEvent.submit(container.querySelector('form'));
+  await waitFor(() => expect(onAuthenticated).toHaveBeenCalledWith({ name: 'Test User' }));
+  expect(authenticate).toHaveBeenCalledWith('signup', { name: 'Test User', email: 'test@example.com', password: 'test-password' });
+});

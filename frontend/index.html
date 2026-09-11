@@ -10,52 +10,9 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/css/styles.css" />
   </head>
   <body>
-    <div id="app" class="app-shell">
-      <header class="global-header">
-        <div class="header-left">
-          <a href="#/scanner" class="brand">
-            <span class="brand-mark" aria-hidden="true"></span>
-            <span class="brand-text">
-              <strong>Cloud Armor Scanner</strong>
-              <small>GCP External LB Security</small>
-            </span>
-          </a>
-          <nav class="main-nav" aria-label="Main navigation">
-            <a href="#/scanner" data-route="scanner">Scanner</a>
-            <a href="#/unprotected" data-route="unprotected">Unprotected Backends</a>
-            <a href="#/flow" data-route="flow">Load Balancer Flow</a>
-          </nav>
-        </div>
-        <div class="header-right">
-          <div class="header-meta">
-            <span class="meta-label">Scope</span>
-            <span id="header-scope" class="meta-value">Not configured</span>
-          </div>
-          <div class="header-meta">
-            <span class="meta-label">Scan</span>
-            <span id="header-scan-status" class="status-pill idle">IDLE</span>
-          </div>
-          <button class="profile-btn" type="button" title="User profile">
-            <span class="profile-avatar">TS</span>
-          </button>
-        </div>
-      </header>
-
-      <main id="page-root" class="page-root"></main>
-    </div>
-
-    <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
-    <aside id="detail-drawer" class="detail-drawer hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
-      <div class="drawer-header">
-        <div><span class="drawer-kicker">RESOURCE DETAILS</span><h2 id="drawer-title">Resource Details</h2></div>
-        <button id="drawer-close" type="button" class="icon-btn" aria-label="Close">✕</button>
-      </div>
-      <div id="drawer-body" class="drawer-body"></div>
-    </aside>
-
-    <script type="module" src="/js/app.js"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

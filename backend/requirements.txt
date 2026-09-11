@@ -6,3 +6,8 @@ google-cloud-compute>=1.19.0
 pydantic>=2.10.0
 pydantic-settings>=2.6.0
 PyYAML>=6.0.0
+
+pymongo>=4.10.0,<5
+email-validator>=2.2.0
+
+bcrypt>=5.0.0,<6
