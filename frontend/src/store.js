@@ -3,7 +3,9 @@ const STORAGE_KEY = "cloud-armor-scanner-state";
 const defaultState = {
   scopeType: "project",
   scopeId: "",
-  serviceAccount: null,
+  connections: [],
+  workspaces: [],
+  connectionId: "",
   preflight: null,
   scanResult: null,
   lastScanTime: null,
@@ -33,7 +35,6 @@ function persist() {
     JSON.stringify({
       scopeType: state.scopeType,
       scopeId: state.scopeId,
-      serviceAccount: state.serviceAccount,
       preflight: state.preflight,
       scanResult: state.scanResult,
       lastScanTime: state.lastScanTime,
@@ -130,4 +131,10 @@ export function resetState() {
   state = { ...defaultState };
   try { localStorage.removeItem(STORAGE_KEY); } catch { /* Storage may be disabled. */ }
   listeners.forEach(listener => listener(state));
+}
+
+export function selectCloudConnection(connectionId) {
+  sessionEpoch += 1;
+  patchState({ connectionId, scopeId: '', preflight: null, scanResult: null,
+    scanLogs: '', scanStatus: 'idle', lastScanTime: null, scanDurationMs: null });
 }

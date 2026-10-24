@@ -35,14 +35,9 @@ class PermissionManifestResponse(BaseModel):
     permissions: list[PermissionManifestEntry]
 
 
-class ServiceAccountInfo(BaseModel):
-    email: str
-    unique_id: str | None = None
-    auth_method: str = "adc"
-
-
 class CheckLbPermissionsResponse(BaseModel):
     project_id: str
+    # Legacy response key; now contains the connected user identity.
     service_account_email: str
     all_permissions_granted: bool
     permissions: list[PermissionCheckResult]
@@ -78,6 +73,7 @@ class ScanResponse(BaseModel):
     project_id: str
     status: ScanStatusValue
     message: str
+    # Legacy response key; now contains the connected user identity.
     service_account_email: str
     preflight: CheckLbPermissionsResponse
     project: ResourceNodeResponse | None = None

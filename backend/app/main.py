@@ -14,25 +14,22 @@ from app.models.schemas import (
     PermissionManifestEntry,
     PermissionManifestResponse,
     ScanResponse,
-    ServiceAccountInfo,
 )
 from app.config import settings
 from app.auth import router as auth_router, require_scanner_user
-from app.services.gcp_credentials import (
-    load_scanner_credentials,
-    resolve_credentials_identity,
-)
+from app.connections import router as connections_router, scan_credentials
 from app.services.lb_permission_checker import LbPermissionChecker
 from app.services.permission_preflight import DEFAULT_MANIFEST_PATH, load_permission_manifest
 from app.services.scan_orchestrator import ScanOrchestrator, build_preflight_response
 
 app = FastAPI(
     title="CloudScanner GCP LB Permission Checker",
-    description="Check whether the configured service account can view GCP load balancers.",
+    description="Scan cloud resources using workspace-owned cloud connections.",
     version="1.0.0",
 )
 
 app.include_router(auth_router)
+app.include_router(connections_router)
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -60,22 +57,6 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/service-account", response_model=ServiceAccountInfo, dependencies=[Depends(require_scanner_user)])
-def get_service_account() -> ServiceAccountInfo:
-    try:
-        credentials = load_scanner_credentials()
-        email, unique_id = resolve_credentials_identity(credentials)
-    except ValueError:
-        email = settings.gcp_service_account_email
-        unique_id = settings.gcp_service_account_unique_id
-
-    return ServiceAccountInfo(
-        email=email,
-        unique_id=unique_id,
-        auth_method="adc",
-    )
-
-
 @app.get("/api/permissions/manifest", response_model=PermissionManifestResponse, dependencies=[Depends(require_scanner_user)])
 def get_permission_manifest() -> PermissionManifestResponse:
     manifest_path = settings.permission_manifest_path or DEFAULT_MANIFEST_PATH
@@ -94,23 +75,23 @@ def _build_check_response(result) -> CheckLbPermissionsResponse:
 
 
 @app.get("/api/v1/scan/{project_id}", response_model=ScanResponse, dependencies=[Depends(require_scanner_user)])
-def scan_project(project_id: str) -> ScanResponse:
+def scan_project(project_id: str, identity=Depends(scan_credentials)) -> ScanResponse:
     if not 6 <= len(project_id) <= 30:
         raise HTTPException(status_code=400, detail="Invalid project ID length.")
 
     try:
-        return ScanOrchestrator().run(project_id)
+        return ScanOrchestrator(*identity).run(project_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to run scan: {exc}",
+            detail="Failed to run scan. Check your connection and project access.",
         ) from exc
 
 
 @app.get("/api/v1/scan/{project_id}/stream", dependencies=[Depends(require_scanner_user)])
-def scan_project_stream(project_id: str) -> StreamingResponse:
+def scan_project_stream(project_id: str, identity=Depends(scan_credentials)) -> StreamingResponse:
     if not 6 <= len(project_id) <= 30:
         raise HTTPException(status_code=400, detail="Invalid project ID length.")
 
@@ -121,12 +102,12 @@ def scan_project_stream(project_id: str) -> StreamingResponse:
 
     def run_scan() -> None:
         try:
-            result = ScanOrchestrator().run(project_id, on_log=on_log)
+            result = ScanOrchestrator(*identity).run(project_id, on_log=on_log)
             log_queue.put(("result", result))
         except ValueError as exc:
             log_queue.put(("error", str(exc)))
         except Exception as exc:
-            log_queue.put(("error", f"Failed to run scan: {exc}"))
+            log_queue.put(("error", "Failed to run scan. Check your connection and project access."))
 
     threading.Thread(target=run_scan, daemon=True).start()
 
@@ -146,23 +127,23 @@ def scan_project_stream(project_id: str) -> StreamingResponse:
 
 
 @app.post("/api/check-lb-permissions", response_model=CheckLbPermissionsResponse, dependencies=[Depends(require_scanner_user)])
-def check_lb_permissions(body: CheckLbPermissionsRequest) -> CheckLbPermissionsResponse:
+def check_lb_permissions(body: CheckLbPermissionsRequest, identity=Depends(scan_credentials)) -> CheckLbPermissionsResponse:
     try:
-        checker = LbPermissionChecker()
+        checker = LbPermissionChecker(*identity)
         result = checker.check(body.project_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to check GCP permissions: {exc}",
+            detail="Failed to check permissions. Check your connection and project access.",
         ) from exc
 
     return _build_check_response(result)
 
 
 @app.post("/api/check-lb-permissions/stream", dependencies=[Depends(require_scanner_user)])
-def check_lb_permissions_stream(body: CheckLbPermissionsRequest) -> StreamingResponse:
+def check_lb_permissions_stream(body: CheckLbPermissionsRequest, identity=Depends(scan_credentials)) -> StreamingResponse:
     log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 
     def on_log(message: str) -> None:
@@ -170,13 +151,13 @@ def check_lb_permissions_stream(body: CheckLbPermissionsRequest) -> StreamingRes
 
     def run_check() -> None:
         try:
-            checker = LbPermissionChecker()
+            checker = LbPermissionChecker(*identity)
             result = checker.check(body.project_id, on_log=on_log)
             log_queue.put(("result", _build_check_response(result)))
         except ValueError as exc:
             log_queue.put(("error", str(exc)))
         except Exception as exc:
-            log_queue.put(("error", f"Failed to check GCP permissions: {exc}"))
+            log_queue.put(("error", "Failed to check permissions. Check your connection and project access."))
 
     threading.Thread(target=run_check, daemon=True).start()
 

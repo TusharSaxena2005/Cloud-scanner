@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from google.api_core import exceptions as google_exceptions
 from google.cloud import compute_v1, resourcemanager_v3
 
-from app.services.gcp_credentials import load_scanner_credentials
 from app.services.gcp_resource_utils import parse_gcp_self_link, resource_scope_label
 
 LogCallback = Callable[[str], None]
@@ -50,8 +49,8 @@ class ScanResult:
 
 
 class ExternalLbScanner:
-    def __init__(self) -> None:
-        self._credentials = load_scanner_credentials()
+    def __init__(self, credentials) -> None:
+        self._credentials = credentials
         self._logs: list[str] = []
 
     def scan(self, project_id: str, on_log: LogCallback | None = None) -> ScanResult:

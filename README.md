@@ -1,286 +1,191 @@
-# Cloud Armor Scanner
+# CloudScanner
 
-**See which public Google Cloud backends have Cloud Armor coverage, and follow the resources behind each load balancer.**
+Cloud security visibility with Google Sign-In, PostgreSQL workspaces, and independent cloud connections. The current scanner discovers GCP external HTTP(S) load balancers and traces forwarding rules, proxies, URL maps, backends, and Cloud Armor policies.
 
-Cloud Armor Scanner combines a React dashboard with a FastAPI backend. It checks Google Cloud permissions, discovers external HTTP(S) load balancers, and traces their forwarding rules, target proxies, URL maps, backend services, and attached security policies.
+## What is implemented
 
-Google Cloud operations are read-only. Account and session data are stored in MongoDB Atlas.
+- Google OIDC login; first sign-in creates a user and personal workspace.
+- Separate **Connect GCP** authorization using the same Google account.
+- User-delegated, read-only Google Cloud API access; no shared service account or ADC fallback.
+- Workspace membership checks on every connection, preflight, and scan request.
+- Encrypted refresh tokens, hashed browser session tokens, OAuth state/nonce/PKCE protection, and rate-limited OAuth starts.
+- Permission preflight, live scan progress, coverage summary, backend filters, expandable resource flow, and resource inspector.
+- Editable display name; email and passwords are managed by Google.
+- Provider-neutral connections; AWS and Azure are displayed as future providers. Their credentials and scanners are **not implemented**.
 
-## Features
+Website login and cloud permissions are separate. Google Sign-In alone cannot scan projects. The user must approve Google Cloud read access and already have the IAM permissions listed in `backend/config/lb_permissions.yaml`. OAuth consent never grants additional IAM roles.
 
-- **Permission preflight:** check the configured credentials before scanning and see missing permissions.
-- **Live scan progress:** stream activity logs while the backend discovers resources.
-- **Coverage overview:** view load balancer, backend, protected, and unprotected counts.
-- **Searchable backend list:** filter by project, load balancer, protection status, or resource name.
-- **Expandable waterfall:** follow resource relationships down and to the right, with page scrolling and expand/collapse controls.
-- **Resource inspector:** click a resource to open its details in a sidebar.
-- **Accounts:** sign up, sign in, sign out, edit your profile, and change your password.
-- **Demo workspace:** explore two sample projects individually or choose **All projects** for a combined view.
+## Local setup (PowerShell)
 
-## Stack
+Requires Python 3.12+, a supported Node.js release (22.12+), and PostgreSQL. Docker Compose is provided for a local database.
 
-- **Frontend:** React 19, Vite 8, CSS, hash-based navigation.
-- **Backend:** Python, FastAPI, Uvicorn, Pydantic, Google Cloud client libraries.
-- **Database:** MongoDB Atlas through PyMongo.
-- **Authentication:** bcrypt password hashes and opaque cookie sessions.
-- **Tests:** Vitest, React Testing Library, Python unittest, and mongomock.
-
-## Quick start
-
-### Prerequisites
-
-- Python **3.12** (the version used for development).
-- Node.js **22.12+** or a compatible newer release, with npm.
-- A MongoDB Atlas cluster and database user with read/write access to the application database.
-- For live scans: Google Cloud credentials with access to the target project. Demo browsing does not require Google Cloud credentials.
-
-The commands below use **PowerShell** and start from the repository root.
-
-### 1. Set up the backend
+From the repository root:
 
 ```powershell
+docker compose up -d postgres
 cd backend
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
-Create `backend/.env` using placeholders like these. If the file already exists, edit it instead of replacing your existing configuration.
+Use `backend/.env.example` as a reference for `backend/.env`. If `.env` already exists, edit it; do not overwrite existing secrets. Old MongoDB settings are ignored by the application.
 
 ```dotenv
-MONGODB_URI=mongodb+srv://<database-user>:<url-encoded-password>@<cluster-host>/?appName=CloudScanner
-MONGODB_DATABASE=cloudscanner
+DATABASE_URL=postgresql+psycopg://cloudscanner:local-development-only@127.0.0.1:5432/cloudscanner
+GOOGLE_CLIENT_ID=<web-oauth-client-id>
+GOOGLE_CLIENT_SECRET=<web-oauth-client-secret>
+PUBLIC_URL=http://127.0.0.1:5173
+CREDENTIAL_ENCRYPTION_KEY=<fernet-key>
 SESSION_COOKIE_SECURE=false
 SESSION_HOURS=24
 CORS_ORIGINS=["http://127.0.0.1:5173","http://localhost:5173"]
 ```
 
-The backend loads this file relative to its own directory, regardless of where Uvicorn is launched. `.env` is ignored by Git; never put connection strings or account passwords in frontend code or documentation.
-
-In Atlas, allow the backend machine's public IP in **Network Access**. On the first database connection, the app creates a unique email index and expiration indexes for sessions and authentication attempt records.
-
-Start the API:
+Generate a key locally and paste its output into `CREDENTIAL_ENCRYPTION_KEY`:
 
 ```powershell
+.\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Keep this key outside the database, backed up securely. Losing it makes stored cloud credentials unreadable; changing it requires re-encrypting existing credentials or reconnecting accounts. Never commit `.env`, OAuth secrets, or database dumps. `postgresql://` URLs are also accepted and use the psycopg driver.
+
+The Compose password is for local development. For a hosted database, use its connection URL and required TLS parameters, such as `?sslmode=require`. Change the local password using `POSTGRES_PASSWORD` before initially creating the Compose volume; changing that environment variable later does not change an existing database password.
+
+## Configure Google OAuth
+
+In your Google Cloud project:
+
+1. Configure the Google Auth Platform consent screen and audience. While in testing, add your Google account as a test user.
+2. Create an OAuth client of type **Web application**.
+3. Register this exact redirect URI for local development:
+   `http://127.0.0.1:5173/api/oauth/google/callback`
+4. Put the client ID and secret in the backend environment.
+5. Configure identity scopes (`openid`, `email`, `profile`) and Google Cloud read access (`https://www.googleapis.com/auth/cloud-platform.read-only`).
+
+The app uses a backend authorization-code redirect flow. The frontend never receives access or refresh tokens. Register each deployment's callback URI exactly; it is always `${PUBLIC_URL}/api/oauth/google/callback`.
+
+Google may require OAuth verification before public use of sensitive scopes. External apps in testing can have short-lived refresh grants; reconnect when Google expires or revokes access. Organization policies can also block user consent. See [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server) and [verification guidance](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification).
+
+## Migrate and run
+
+From `backend`:
+
+```powershell
+.\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### 2. Start the frontend
-
-Open another terminal from the repository root:
+In a second terminal, from `frontend`:
 
 ```powershell
-cd frontend
 npm ci
 npm run dev
 ```
 
-Open the address printed by Vite, normally [http://127.0.0.1:5173](http://127.0.0.1:5173).
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Keep this hostname consistent with `PUBLIC_URL`. Vite proxies `/api`, including the OAuth callback, to FastAPI.
 
-The development server proxies `/api` requests to `http://127.0.0.1:8000`. Both processes must be running. Create an account using **Create an account**, or seed a demo account using the instructions below.
+1. Click **Continue with Google**.
+2. Open **Cloud connections**, choose your workspace, and click **Connect GCP**.
+3. Approve read-only cloud access using the same Google account.
+4. Open **Scanner**, select the connection, and enter a GCP project ID.
+5. Click **Check permissions**, resolve missing IAM permissions or disabled APIs, then **Start scan**.
 
-> Use the same browser hostname consistently. `localhost` and `127.0.0.1` have separate cookie sessions.
+Every scan repeats preflight on the backend using the selected connection. Switching or disconnecting a connection clears the browser's previous preflight and results. Revoked credentials require reconnecting. Disconnect deletes the encrypted credentials for that workspace; to revoke the complete Google grant, use your [Google account connections](https://myaccount.google.com/permissions). The app does not revoke the combined grant automatically, because it may also be used by the same account in another workspace.
 
-## Connect Google Cloud
+## Existing MongoDB users
 
-The backend uses **Application Default Credentials (ADC)**. Application login and Google Cloud authentication are separate: signing into the dashboard does not connect a Google account.
+This change creates a new PostgreSQL schema; it does not read, modify, or delete the existing MongoDB database. Password login, password reset, and password changes have been removed. Existing sessions do not transfer. New Google sign-ins create personal workspaces automatically.
 
-For local development with the Google Cloud CLI:
+Optional migration tooling is in `backend/scripts/import_mongo_users.py`. It imports names, emails, creation dates, and demo flags, creating one workspace per mapped identity. It never imports passwords, old sessions, or tokens. Existing Google identities are skipped and are not overwritten. Live scan history was not persisted in MongoDB and therefore has no historical records to migrate.
 
-```powershell
-gcloud auth application-default login
+To preserve selected legacy accounts, an operator must first verify the destination Google subject for each legacy account. Do not derive or automatically match Google identities from email alone. Prepare a private JSON mapping:
+
+```json
+{"<legacy-mongo-object-id>": "<verified-google-subject>"}
 ```
 
-Alternatively, set a service account key path in the backend terminal before starting Uvicorn:
+From `backend`, with the source URI supplied only in the terminal environment:
 
 ```powershell
-$env:GOOGLE_APPLICATION_CREDENTIALS = "C:\secure\scanner-service-account.json"
+.\.venv\Scripts\python.exe -m pip install 'pymongo>=4.10,<5'
+$env:PYTHONPATH = "."
+$env:MONGODB_URI = "<source-uri>"
+.\.venv\Scripts\python.exe scripts/import_mongo_users.py --mapping C:\secure\identity-map.json
+# After reviewing the preview counts:
+.\.venv\Scripts\python.exe scripts/import_mongo_users.py --mapping C:\secure\identity-map.json --apply
 ```
 
-Keep credential files outside the repository. On Google Cloud infrastructure, the runtime can supply ADC through an attached service account.
+Without `--apply`, the import rolls back all writes. With it, PostgreSQL writes commit as one transaction. MongoDB is accessed only for reads. Back up both databases before a real cutover.
 
-### Required access
-
-The permission manifest is [backend/config/lb_permissions.yaml](backend/config/lb_permissions.yaml). It includes project lookup and list/get access for forwarding rules, HTTP(S) proxies, URL maps, backend services, and security policies. Regional discovery also lists Compute Engine regions.
-
-The configured principal needs sufficient access to the resources being inspected, and the relevant Compute Engine and Cloud Resource Manager APIs must be available. The preflight and scan logs help identify permission or API errors.
-
-### Run a live scan
-
-1. Sign in with a regular account.
-2. Open **Scanner** and select **Project** scope.
-3. Enter the Google Cloud project ID.
-4. Click **Check permissions** and resolve any reported issues.
-5. Click **Start scan**.
-6. Explore **Unprotected Backends** or **Load Balancer Flow**.
-
-Changing the project invalidates the previous permission check. The backend also performs its own preflight when a scan starts.
-
-## Demo account and sample data
-
-From `backend`, with MongoDB configured:
+To make an existing Google user a demo-only account, run:
 
 ```powershell
 $env:PYTHONPATH = "."
-.\.venv\Scripts\python.exe scripts/seed_demo.py
+.\.venv\Scripts\python.exe scripts/seed_demo.py --google-sub <verified-google-subject>
 ```
 
-The script creates `demo@example.com` and prints a generated password once. Save that password locally. It refuses to overwrite an account with the same email.
+Demo identities can browse generated samples but cannot connect accounts or run live scans.
 
-The sample workspace contains:
+## Production serving
 
-- **demo-cloud-armor:** 3 load balancers and 6 backends, with 3 protected and 3 unprotected.
-- **demo-commerce-platform:** 2 load balancers and 4 backends, with 3 protected and 1 unprotected.
-- **All projects:** a combined summary and backend list, with separate project branches in the waterfall.
-
-Sample addresses and resource names are fictional. Sample data belongs to the demo account and is loaded after authentication. Demo accounts cannot call live scanning APIs.
-
-## Profile and authentication
-
-Click the initials avatar in the top bar to open **Your profile**.
-
-- **Edit profile** updates your name and email. Email changes require your current password.
-- **Change password** requires your current password and confirmation of the new one. Other sessions are invalidated after a successful change.
-- New passwords use **bcrypt with cost 12** and a random salt. They must contain at least 8 characters and fit within **72 UTF-8 bytes**; passwords are never silently truncated.
-- Existing scrypt hashes remain compatible. They are upgraded after a successful login when the password fits bcrypt's limit. Longer legacy passwords remain usable until changed.
-- Session cookies are **HttpOnly**, use **SameSite=Strict**, and expire after the configured lifetime. MongoDB stores a hash of each session token, not the browser token itself.
-- Authentication mutations require the application's request header. Login and signup attempts are rate limited.
-
-Live scan results are held in browser state and mirrored to local storage. Authentication changes clear that state, and a page reload starts a fresh live workspace. MongoDB currently persists accounts, sessions, attempt records, and seeded demo snapshots—not a live scan history.
-
-## Build and serve with FastAPI
-
-From the repository root:
+Build the frontend, set `PUBLIC_URL` to the HTTPS application origin, register its Google callback URI, set `SESSION_COOKIE_SECURE=true`, run migrations, then start FastAPI:
 
 ```powershell
 cd frontend
 npm ci
 npm run build
 cd ..\backend
+.\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). FastAPI serves `frontend/dist/index.html` and `/assets`. Build the frontend **before** starting the backend, and restart the backend if it was started before the build directory existed.
+Serve UI and API through the same HTTPS origin. The backend serves the built frontend when `frontend/dist` exists at startup. Browser sessions use HttpOnly, SameSite=Lax cookies; callback state is one-use, expires after ten minutes, and is bound to the initiating browser. GCP connection callbacks are additionally bound to the current signed-in session. Use a trusted reverse proxy if proxy headers are enabled. Rate limiting uses the request's client IP.
 
-For an HTTPS deployment, set `SESSION_COOKIE_SECURE=true` and serve the UI and API through the same origin. The frontend currently uses same-origin credentials; changing CORS settings alone does not enable a separately hosted cross-origin login flow.
-
-`npm run preview` previews the static build. It is not the documented full-stack serving path; use FastAPI to verify authentication and scanning with a production build.
-
-## Configuration
-
-Settings are defined in [backend/app/config.py](backend/app/config.py).
-
-- `MONGODB_URI`: backend-only Atlas connection string.
-- `MONGODB_DATABASE`: application database; defaults to `cloudscanner`.
-- `SESSION_HOURS`: session lifetime; defaults to `24`.
-- `SESSION_COOKIE_SECURE`: `false` for local HTTP; set to `true` when deploying over HTTPS.
-- `CORS_ORIGINS`: JSON list of allowed browser origins. Local Vite origins are configured by default.
-- `PERMISSION_MANIFEST_PATH`: optional alternate permission manifest path; an absolute path avoids launch-directory ambiguity.
-- `GCP_SERVICE_ACCOUNT_EMAIL` and `GCP_SERVICE_ACCOUNT_UNIQUE_ID`: identity metadata/fallback values. These do not provide Google Cloud credentials or grant permissions.
-
-Use Uvicorn's `--host` and `--port` arguments to choose the listening address. If the API port changes, update the proxy in [frontend/vite.config.js](frontend/vite.config.js).
+No tables are created automatically at application startup. Alembic owns the schema. Never point test tooling at a production database.
 
 ## API
 
-Interactive API documentation is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) while the backend is running.
+Interactive documentation: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
-**Accounts**
+- `POST /api/auth/google/start`: obtain a Google login URL and binding cookie.
+- `GET /api/oauth/google/callback`: validate state, exchange code, verify Google identity, then redirect.
+- `GET /api/auth/me`, `POST /api/auth/logout`, `PATCH /api/auth/profile`.
+- `GET /api/workspaces`: workspaces accessible to the signed-in user.
+- `GET /api/connections`: accessible connections and provider availability, without credentials.
+- `POST /api/workspaces/{workspace_id}/connections/gcp/start`: begin cloud consent (workspace owner).
+- `DELETE /api/connections/{connection_id}`: disconnect (workspace owner).
+- `GET /api/permissions/manifest`.
+- `POST /api/check-lb-permissions?connection_id=<id>` and `/stream`: body `{"project_id":"my-project"}`.
+- `GET /api/v1/scan/{project_id}?connection_id=<id>` and `/{project_id}/stream?connection_id=<id>`.
+- `GET /health`: process health only; does not establish Google or database connectivity.
 
-- `POST /api/auth/signup`: create an account and session.
-- `POST /api/auth/login`: authenticate and start a session.
-- `GET /api/auth/me`: retrieve the current account.
-- `POST /api/auth/logout`: revoke the current session.
-- `PATCH /api/auth/profile`: update account details.
-- `PATCH /api/auth/password`: change the password and invalidate other sessions.
+Authentication mutations and connection mutations require `X-CloudScanner-Request: 1`. Scan APIs require a workspace-accessible GCP connection; they never use machine ADC. The legacy response field `service_account_email` now contains the connected user's email, retained for compatibility with the resource views.
 
-For authentication mutations, send `Content-Type: application/json` and `X-CloudScanner-Request: 1`. The frontend handles these headers and session cookies.
+## Validation
 
-**Scanning — authenticated, non-demo accounts only**
-
-- `GET /api/service-account`: configured Google Cloud identity.
-- `GET /api/permissions/manifest`: permission manifest.
-- `POST /api/check-lb-permissions`: permission check.
-- `POST /api/check-lb-permissions/stream`: streamed permission check.
-- `GET /api/v1/scan/{project_id}`: scan a project.
-- `GET /api/v1/scan/{project_id}/stream`: streamed scan.
-
-The permission-check body is `{"project_id":"your-project-id"}`. Streaming endpoints emit server-sent events containing logs, a result, or an error.
-
-`GET /health` is a process health check. A successful response does not establish MongoDB or Google Cloud connectivity.
-
-## Tests
-
-Frontend, from `frontend`:
+From `frontend`:
 
 ```powershell
 npm test -- --maxWorkers=1
 npm run build
 ```
 
-Backend, from `backend`:
+From `backend`:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Backend tests use mongomock rather than the Atlas database. Frontend tests cover forms, account updates, filters, waterfall controls, resource details, and demo project aggregation. These tests do not prove live Atlas or Google Cloud connectivity.
+FastAPI tests use a relational SQLite fixture and mocked Google exchanges. Migration tests compare the migrated schema with ORM metadata. PostgreSQL migration SQL can be inspected without connecting via `alembic upgrade head --sql`. These checks do not prove live Google consent, project permissions, or a hosted PostgreSQL connection.
 
-## Project structure
+## Current limits
 
-```text
-CloudScanner/
-├── backend/
-│   ├── app/
-│   │   ├── main.py              # API routes and production frontend serving
-│   │   ├── auth.py              # Accounts, password hashing, sessions
-│   │   ├── config.py            # Environment settings
-│   │   ├── models/              # Request and response schemas
-│   │   └── services/            # Google Cloud discovery and permission checks
-│   ├── config/lb_permissions.yaml
-│   ├── scripts/seed_demo.py
-│   ├── tests/
-│   ├── requirements.txt
-│   └── requirements-dev.txt
-├── frontend/
-│   ├── src/                    # React pages, components, API client, tests
-│   ├── css/styles.css
-│   ├── index.html
-│   ├── package.json
-│   └── vite.config.js
-└── LICENSE
-```
-
-## Troubleshooting
-
-### Sign-in service unavailable
-
-Check that the Python API is running on port 8000 and that the Vite proxy targets that port. A proxy `502` usually means the frontend cannot reach the API. Restart the backend after installing dependencies or changing backend code when not using `--reload`.
-
-### Cannot connect to the account database
-
-Check `MONGODB_URI`, Atlas database-user permissions, and the backend machine's current public IP in Atlas Network Access. DNS failures, VPN/firewall restrictions, and TLS handshake failures can prevent connectivity even when `/health` succeeds. An unavailable database is not the same as an incorrect account password. Keep TLS verification enabled while diagnosing the connection.
-
-### Application Default Credentials not found
-
-Run `gcloud auth application-default login`, set `GOOGLE_APPLICATION_CREDENTIALS` in the backend process environment, or configure the runtime's attached service account. Restart the backend after changing its environment.
-
-### Scan is blocked or returns incomplete resources
-
-Review the permission results and activity log. Missing access prevents the scan from starting or can leave resources unresolved. Check the selected project ID, enabled APIs, and the configured principal's access.
-
-### Frontend build missing
-
-Run `npm ci` and `npm run build` from `frontend`, then restart the backend. Do not open the source `index.html` directly in a browser.
-
-## Current scope and limitations
-
-- Live scanning supports **one project at a time**. Folder and organization scans are not implemented. **All projects** currently combines seeded demo snapshots.
-- Discovery targets external HTTP(S) load balancers using `EXTERNAL` or `EXTERNAL_MANAGED`, including global and regional forwarding rules. It is not an inventory of every Google Cloud load balancer type.
-- A protected label indicates an attached, resolved Cloud Armor policy. It does not assess rule quality or prove that an application is secure.
-- Unresolved backends/policies can appear as unprotected. Review details and logs before interpreting a finding as confirmed exposure.
-- All regular application accounts use the **same backend ADC identity**. Signup does not establish per-user Google Cloud credentials or project-level authorization. Restrict access appropriately before offering the app to multiple tenants.
-- Email verification, forgotten-password recovery, and persistent live scan history are not implemented.
+- Only GCP external HTTP(S) load balancers are scanned, one project at a time. AWS, Azure, folder, and organization scanning are not implemented.
+- One personal workspace is created per user. Membership enforcement is implemented; invitations and workspace administration UI are not.
+- GCP connections currently require the same Google identity as website sign-in.
+- Connections are persisted; live scan results remain in browser state/local storage and are cleared on authentication or connection changes. Persistent scan history is not implemented.
+- A protected label indicates an attached resolved policy; it does not assess policy effectiveness. Unresolved resources require reviewing scan logs.
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 Tushar Saxena.
+[MIT](LICENSE).

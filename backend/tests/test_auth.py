@@ -1,149 +1,292 @@
-import unittest
-from datetime import datetime, timedelta, timezone
-import mongomock
-from fastapi import FastAPI
+"""OAuth and tenant-isolation regressions; no live Google credentials required."""
+from datetime import timedelta
+from unittest import TestCase, main
+from unittest.mock import patch, Mock
+from urllib.parse import urlparse, parse_qs
+
+from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from app.auth import router, get_db, initialize_indexes, COOKIE, token_hash
-from app.main import app as full_app
+from sqlalchemy import create_engine, select, func, event
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app.auth import COOKIE, token_hash, create_google_user
+from app.config import settings
+from app.connections import GCP_SCOPE, seal, unseal, verify_identity
+from app.database import Base, User, Workspace, Membership, BrowserSession, OAuthAttempt, CloudConnection, get_db, now
+from app.main import app
 
 
-class AuthTests(unittest.TestCase):
+class AuthTests(TestCase):
     def setUp(self):
-        self.db = mongomock.MongoClient(tz_aware=True).cloudscanner
-        initialize_indexes(self.db)
-        app = FastAPI()
-        app.include_router(router)
-        app.dependency_overrides[get_db] = lambda: self.db
+        self.engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+        @event.listens_for(self.engine, 'connect')
+        def foreign_keys(connection, record):
+            connection.execute('PRAGMA foreign_keys=ON')
+        Base.metadata.create_all(self.engine)
+        def db_session():
+            with Session(self.engine, expire_on_commit=False) as db:
+                yield db
+        app.dependency_overrides[get_db] = db_session
         self.client = TestClient(app)
-        self.headers = {"X-CloudScanner-Request": "1"}
-        self.user = {"name": "Test User", "email": "user@example.com", "password": "correct-password"}
+        self.headers = {'X-CloudScanner-Request': '1'}
+        self.saved = {key: getattr(settings, key) for key in ['google_client_id', 'google_client_secret', 'public_url', 'credential_encryption_key', 'session_cookie_secure']}
+        settings.google_client_id = 'test-client'
+        settings.google_client_secret = 'test-secret'
+        settings.public_url = 'http://testserver'
+        # Only loopback HTTP is allowed by the production OAuth configuration guard.
+        settings.public_url = 'http://127.0.0.1:5173'
+        settings.credential_encryption_key = Fernet.generate_key().decode()
+        settings.session_cookie_secure = False
+        self.claims = {'sub': 'google-sub-1', 'email': 'one@example.com', 'email_verified': True, 'name': 'User One'}
+        self.exchange = patch('app.connections.exchange_code', return_value={'id_token': 'verified-token', 'refresh_token': 'secret-refresh', 'scope': 'openid email profile ' + GCP_SCOPE}).start()
+        self.identity = patch('app.connections.verify_identity', side_effect=lambda token, nonce: dict(self.claims)).start()
+        self.addCleanup(patch.stopall)
 
-    def signup(self):
-        return self.client.post('/api/auth/signup', json=self.user, headers=self.headers)
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.clear()
+        self.engine.dispose()
+        for key, value in self.saved.items():
+            setattr(settings, key, value)
 
-    def test_signup_session_logout_and_password_storage(self):
-        response = self.signup()
-        self.assertEqual(response.status_code, 201)
-        self.assertNotIn('password', response.text)
+    def start(self, path='/api/auth/google/start'):
+        response = self.client.post(path, headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        return parse_qs(urlparse(response.json()['url']).query)
+
+    def finish(self, params, **extra):
+        return self.client.get('/api/oauth/google/callback', params={'state': params['state'][0], 'code': 'one-use-code', **extra}, follow_redirects=False)
+
+    def login(self):
+        response = self.finish(self.start())
+        self.assertEqual(response.status_code, 303, response.text)
+        self.assertIn('/#/scanner', response.headers['location'])
+        return self.client.get('/api/auth/me').json()['user']
+
+    def workspace(self):
+        return self.client.get('/api/workspaces').json()['workspaces'][0]['id']
+
+    def connect(self):
+        params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
+        response = self.finish(params)
+        self.assertNotIn('oauth_error', response.headers['location'], response.headers['location'])
+        return self.client.get('/api/connections').json()['connections'][0]
+
+    def test_login_session_profile_and_logout(self):
+        user = self.login()
+        self.assertEqual(user['email'], 'one@example.com')
+        self.assertEqual(user['auth_provider'], 'google')
+        self.assertNotIn('password', str(user))
+        self.assertEqual(len(self.client.get('/api/workspaces').json()['workspaces']), 1)
+        with Session(self.engine) as db:
+            session = db.scalar(select(BrowserSession))
+            self.assertEqual(session.token_hash, token_hash(self.client.cookies.get(COOKIE)))
+        response = self.client.patch('/api/auth/profile', json={'name': 'New Name'}, headers=self.headers)
+        self.assertEqual(response.json()['user']['name'], 'New Name')
+        self.assertEqual(self.client.patch('/api/auth/profile', json={'name': 'X', 'email': 'other@example.com'}, headers=self.headers).status_code, 422)
+        self.assertEqual(self.client.post('/api/auth/logout').status_code, 403)
+        self.client.post('/api/auth/logout', headers=self.headers)
+        self.assertEqual(self.client.get('/api/auth/me').status_code, 401)
+
+    def test_csrf_pkce_nonce_and_cookie(self):
+        self.assertEqual(self.client.post('/api/auth/google/start').status_code, 403)
+        params = self.start()
+        self.assertEqual(params['code_challenge_method'], ['S256'])
+        self.assertIn('nonce', params)
+        self.assertNotIn(GCP_SCOPE, params['scope'][0])
+        self.assertNotIn('test-secret', str(params))
+        response = self.finish(params)
         self.assertIn('HttpOnly', response.headers['set-cookie'])
-        stored = self.db.users.find_one()
-        self.assertNotEqual(stored['password_hash'], self.user['password'])
-        self.assertNotIn('password', stored)
-        self.assertEqual(self.client.get('/api/auth/me').status_code, 200)
-        token = self.client.cookies.get(COOKIE)
-        self.assertIsNotNone(self.db.sessions.find_one({'_id': token_hash(token)}))
-        self.client.post('/api/auth/logout', headers=self.headers)
+        self.assertIn('SameSite=lax', response.headers['set-cookie'])
+
+    def test_wrong_state_cookie_and_replay(self):
+        params = self.start()
+        self.assertEqual(self.finish({'state': ['wrong-state']}).status_code, 400)
+        binding = self.client.cookies.get('cloudscanner_oauth')
+        self.client.cookies.clear()
+        self.assertEqual(self.finish(params).status_code, 400)
+        self.client.cookies.set('cloudscanner_oauth', binding)
+        self.assertEqual(self.finish(params).status_code, 303)
+        self.assertEqual(self.finish(params).status_code, 400)
+        self.assertEqual(self.exchange.call_count, 1)
+
+    def test_expired_oauth_and_session(self):
+        params = self.start()
+        with Session(self.engine) as db:
+            db.scalar(select(OAuthAttempt)).expires_at = now() - timedelta(seconds=1)
+            db.commit()
+        self.assertEqual(self.finish(params).status_code, 400)
+        self.login()
+        with Session(self.engine) as db:
+            db.scalar(select(BrowserSession)).expires_at = now() - timedelta(seconds=1)
+            db.commit()
         self.assertEqual(self.client.get('/api/auth/me').status_code, 401)
-        self.assertEqual(self.db.sessions.count_documents({}), 0)
 
-    def test_duplicate_email_bad_password_and_login(self):
-        self.signup()
-        self.assertEqual(self.signup().status_code, 409)
-        data = {"email": "USER@example.com", "password": "wrong"}
-        self.assertEqual(self.client.post('/api/auth/login', json=data, headers=self.headers).status_code, 401)
-        data['password'] = self.user['password']
-        self.assertEqual(self.client.post('/api/auth/login', json=data, headers=self.headers).status_code, 200)
-        self.assertEqual(self.db.sessions.count_documents({}), 1)
+    def test_cancelled_consent_can_retry(self):
+        response = self.finish(self.start(), error='access_denied')
+        self.assertIn('oauth_error', response.headers['location'])
+        self.exchange.assert_not_called()
+        self.login()
 
-    def test_expired_session_rejected(self):
-        self.signup()
-        self.db.sessions.update_many({}, {'$set': {'expires_at': datetime.now(timezone.utc) - timedelta(seconds=1)}})
-        self.assertEqual(self.client.get('/api/auth/me').status_code, 401)
+    def test_repeated_login_uses_subject_not_email(self):
+        first = self.login()
+        self.claims['email'] = 'renamed@example.com'
+        second = self.login()
+        self.assertEqual(first['id'], second['id'])
+        self.assertEqual(second['email'], 'renamed@example.com')
+        with Session(self.engine) as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(Workspace)), 1)
+            self.assertEqual(db.scalar(select(func.count()).select_from(BrowserSession)), 1)
+        self.claims['sub'] = 'different-google-account'
+        third = self.login()
+        self.assertNotEqual(first['id'], third['id'])
 
-    def test_csrf_validation_and_rate_limit(self):
-        self.assertEqual(self.client.post('/api/auth/signup', json=self.user).status_code, 403)
-        self.assertEqual(self.client.post('/api/auth/signup', json={**self.user, 'password': 'short'}, headers=self.headers).status_code, 422)
-        self.signup()
-        self.db.auth_attempts.update_many({}, {'$set': {'count': 100}})
-        self.assertEqual(self.client.post('/api/auth/login', json=self.user, headers=self.headers).status_code, 429)
+    def test_connection_credentials_are_encrypted_and_not_public(self):
+        self.login()
+        connection = self.connect()
+        self.assertEqual(connection['provider'], 'gcp')
+        with Session(self.engine) as db:
+            stored = db.get(CloudConnection, connection['id'])
+            self.assertNotIn('secret-refresh', stored.encrypted_credentials)
+            self.assertEqual(unseal(stored.encrypted_credentials)['refresh_token'], 'secret-refresh')
+        self.assertNotIn('secret-refresh', self.client.get('/api/connections').text)
+        self.assertNotIn('encrypted_credentials', self.client.get('/api/connections').text)
+        self.assertEqual(len(self.client.get('/api/connections').json()['providers']), 3)
 
-    def test_demo_data_is_account_scoped_and_live_scans_are_blocked(self):
-        self.signup()
-        self.db.users.update_one({"email": self.user["email"]}, {"$set": {"is_demo": True, "sample_workspace": {"sampleMode": True}}})
-        response = self.client.get('/api/auth/me')
-        self.assertTrue(response.json()['user']['sample_workspace']['sampleMode'])
-        full_app.dependency_overrides[get_db] = lambda: self.db
-        try:
-            with TestClient(full_app) as client:
-                client.cookies.set(COOKIE, self.client.cookies.get(COOKIE))
-                self.assertEqual(client.get('/api/v1/scan/demo-project/stream').status_code, 403)
-        finally:
-            full_app.dependency_overrides.clear()
-        self.db.users.update_one({"email": self.user["email"]}, {"$set": {"is_demo": False}})
-        self.assertIsNone(self.client.get('/api/auth/me').json()['user']['sample_workspace'])
+    def test_missing_scope_and_wrong_account_are_rejected(self):
+        self.login()
+        self.exchange.return_value['scope'] = 'openid email profile'
+        params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
+        self.assertIn('oauth_error', self.finish(params).headers['location'])
+        self.exchange.return_value['scope'] += ' ' + GCP_SCOPE
+        params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
+        self.claims['sub'] = 'different-account'
+        self.assertIn('oauth_error', self.finish(params).headers['location'])
+        self.assertEqual(self.client.get('/api/connections').json()['connections'], [])
 
-    def test_profile_update_persists_and_email_requires_password(self):
-        self.signup()
-        values = {"name": "New Name", "email": self.user["email"]}
-        self.assertEqual(self.client.patch('/api/auth/profile', json=values, headers=self.headers).status_code, 200)
-        self.assertEqual(self.client.get('/api/auth/me').json()['user']['name'], 'New Name')
-        values['email'] = 'new@example.com'
-        self.assertEqual(self.client.patch('/api/auth/profile', json=values, headers=self.headers).status_code, 400)
-        values['current_password'] = self.user['password']
-        self.assertEqual(self.client.patch('/api/auth/profile', json=values, headers=self.headers).status_code, 200)
-        self.assertEqual(self.client.get('/api/auth/me').json()['user']['email'], 'new@example.com')
-        self.db.users.insert_one({'email': 'taken@example.com'})
-        values['email'] = 'taken@example.com'
-        self.assertEqual(self.client.patch('/api/auth/profile', json=values, headers=self.headers).status_code, 409)
-        self.assertEqual(self.client.get('/api/auth/me').json()['user']['email'], 'new@example.com')
+    def test_logout_during_connect_invalidates_callback(self):
+        self.login()
+        params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
         self.client.post('/api/auth/logout', headers=self.headers)
-        self.assertEqual(self.client.patch('/api/auth/profile', json=values, headers=self.headers).status_code, 401)
+        calls = self.exchange.call_count
+        self.assertIn('oauth_error', self.finish(params).headers['location'])
+        self.assertEqual(self.exchange.call_count, calls)
 
-    def test_password_change_verifies_old_password_and_revokes_other_sessions(self):
-        self.signup()
-        from app.auth import password_hash, token_hash, COOKIE
-        from datetime import datetime, timezone, timedelta
-        self.db.sessions.insert_one({"_id": "another-session", "user_id": self.db.users.find_one()["_id"],
-                                     "expires_at": datetime.now(timezone.utc) + timedelta(hours=1)})
-        values = {"current_password": "wrong-password", "new_password": "new-password-123"}
-        self.assertEqual(self.client.patch('/api/auth/password', json=values, headers=self.headers).status_code, 400)
-        values['current_password'] = self.user['password']
-        self.assertEqual(self.client.patch('/api/auth/password', json=values).status_code, 403)
-        self.assertEqual(self.client.patch('/api/auth/password', json={**values, 'new_password': 'short'}, headers=self.headers).status_code, 422)
-        self.assertEqual(self.client.patch('/api/auth/password', json=values, headers=self.headers).status_code, 200)
-        self.assertIsNone(self.db.sessions.find_one({'_id': 'another-session'}))
-        self.assertEqual(self.client.get('/api/auth/me').status_code, 200)
-        self.assertEqual(self.client.post('/api/auth/login', json=self.user, headers=self.headers).status_code, 401)
-        self.assertEqual(self.client.post('/api/auth/login', json={**self.user, 'password': values['new_password']}, headers=self.headers).status_code, 200)
+    def test_foreign_connections_and_workspaces_are_inaccessible(self):
+        self.login()
+        first_workspace = self.workspace()
+        connection = self.connect()
+        self.claims['sub'] = 'second-user'
+        self.claims['email'] = 'two@example.com'
+        self.login()
+        self.assertEqual(self.client.get('/api/connections').json()['connections'], [])
+        self.assertEqual(self.client.post(f'/api/workspaces/{first_workspace}/connections/gcp/start', headers=self.headers).status_code, 404)
+        self.assertEqual(self.client.delete('/api/connections/' + connection['id'], headers=self.headers).status_code, 404)
+        for path in [f'/api/v1/scan/my-project?connection_id={connection["id"]}', f'/api/v1/scan/my-project/stream?connection_id={connection["id"]}']:
+            self.assertEqual(self.client.get(path).status_code, 404)
+        for path in ['/api/check-lb-permissions', '/api/check-lb-permissions/stream']:
+            self.assertEqual(self.client.post(path, params={'connection_id': connection['id']}, json={'project_id': 'my-project'}).status_code, 404)
 
-    def test_bcrypt_hashes_and_legacy_login_migration(self):
-        import hashlib
-        from app.auth import verify_password, password_hash
-        self.signup()
-        stored = self.db.users.find_one()
-        self.assertTrue(stored['password_hash'].startswith('$2b$12$'))
-        self.assertTrue(verify_password(self.user['password'], stored['password_hash']))
-        self.assertNotEqual(password_hash(self.user['password']), stored['password_hash'])
-        salt = b'0123456789abcdef'
-        digest = hashlib.scrypt(self.user['password'].encode(), salt=salt, n=32768, r=8, p=3, maxmem=64*1024*1024, dklen=32)
-        legacy = f'scrypt${salt.hex()}${digest.hex()}'
-        self.db.users.update_one({'_id': stored['_id']}, {'$set': {'password_hash': legacy}})
-        self.assertEqual(self.client.post('/api/auth/login', json={**self.user, 'password': 'wrong'}, headers=self.headers).status_code, 401)
-        self.assertEqual(self.db.users.find_one()['password_hash'], legacy)
-        self.assertEqual(self.client.post('/api/auth/login', json=self.user, headers=self.headers).status_code, 200)
-        self.assertTrue(self.db.users.find_one()['password_hash'].startswith('$2b$12$'))
+    def test_scan_uses_selected_credentials_and_repeats_preflight(self):
+        self.login()
+        connection = self.connect()
+        with patch('app.connections.Credentials.refresh') as refresh, patch('app.main.ScanOrchestrator') as orchestrator:
+            orchestrator.return_value.run.return_value = Mock(model_dump=lambda: {'status': 'completed'})
+            response = self.client.get(f'/api/v1/scan/my-project/stream?connection_id={connection["id"]}')
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('completed', response.text)
+            refresh.assert_called_once()
+            credentials, label = orchestrator.call_args.args
+            self.assertEqual(credentials.refresh_token, 'secret-refresh')
+            self.assertEqual(label, 'one@example.com')
+        with patch('app.services.scan_orchestrator.LbPermissionChecker') as checker, patch('app.services.scan_orchestrator.ExternalLbScanner') as scanner:
+            from app.services.scan_orchestrator import ScanOrchestrator
+            checker.return_value.check.return_value = Mock(project_id='my-project', service_account_email='user', all_permissions_granted=False, permissions=[], missing_permissions=['permission'], invalid_permissions=[], message='blocked', logs=[])
+            credentials = object()
+            self.assertEqual(ScanOrchestrator(credentials, 'user').run('my-project').status, 'blocked')
+            checker.assert_called_once_with(credentials, 'user')
+            scanner.assert_not_called()
 
-    def test_bcrypt_length_limit_and_long_legacy_password(self):
-        import hashlib
-        from app.auth import verify_password
-        for password in ['x' * 73, '\u00e9' * 37]:
-            self.assertEqual(self.client.post('/api/auth/signup', json={**self.user, 'password': password}, headers=self.headers).status_code, 422)
-        self.signup()
-        self.assertEqual(self.client.patch('/api/auth/password', json={'current_password': self.user['password'], 'new_password': 'x' * 73}, headers=self.headers).status_code, 422)
-        long_password = 'x' * 100
-        salt = b'0123456789abcdef'
-        digest = hashlib.scrypt(long_password.encode(), salt=salt, n=32768, r=8, p=3, maxmem=64*1024*1024, dklen=32)
-        legacy = f'scrypt${salt.hex()}${digest.hex()}'
-        self.db.users.update_one({'email': self.user['email']}, {'$set': {'password_hash': legacy}})
-        self.assertEqual(self.client.post('/api/auth/login', json={**self.user, 'password': long_password}, headers=self.headers).status_code, 200)
-        self.assertEqual(self.db.users.find_one()['password_hash'], legacy)
-        self.assertFalse(verify_password('password', 'invalid-hash'))
+    def test_revoked_tokens_require_reconnect_and_disconnect_removes_access(self):
+        from google.auth.exceptions import RefreshError
+        self.login()
+        connection = self.connect()
+        path = f'/api/v1/scan/my-project?connection_id={connection["id"]}'
+        with patch('app.connections.Credentials.refresh', side_effect=RefreshError('secret response')):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 409)
+            self.assertNotIn('secret response', response.text)
+        self.assertEqual(self.client.delete('/api/connections/' + connection['id'], headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.get(path).status_code, 404)
 
-    def test_scanner_api_requires_login(self):
-        with TestClient(full_app) as client:
-            for path in ['/api/service-account', '/api/permissions/manifest', '/api/v1/scan/demo-project/stream']:
-                self.assertEqual(client.get(path).status_code, 401)
+    def test_reconnect_preserves_refresh_token_when_google_omits_it(self):
+        self.login()
+        first = self.connect()
+        self.exchange.return_value.pop('refresh_token')
+        second = self.connect()
+        self.assertEqual(first['id'], second['id'])
+        self.assertEqual(len(self.client.get('/api/connections').json()['connections']), 1)
+
+    def test_identity_verifier_checks_nonce_and_verified_email(self):
+        with patch('app.connections.id_token.verify_oauth2_token', return_value={**self.claims, 'nonce': 'expected'}) as verify:
+            self.assertEqual(verify_identity('token', 'expected')['sub'], 'google-sub-1')
+            verify.assert_called_with('token', __import__('unittest.mock', fromlist=['ANY']).ANY, 'test-client')
+            with self.assertRaises(HTTPException):
+                verify_identity('token', 'wrong')
+        with patch('app.connections.id_token.verify_oauth2_token', return_value={**self.claims, 'email_verified': False, 'nonce': 'expected'}):
+            with self.assertRaises(HTTPException):
+                verify_identity('token', 'expected')
+
+    def test_oauth_rate_limit_and_configuration_errors(self):
+        self.start()
+        from app.database import AuthRateLimit
+        with Session(self.engine) as db:
+            db.scalar(select(AuthRateLimit)).attempts = 50
+            db.commit()
+        self.assertEqual(self.client.post('/api/auth/google/start', headers=self.headers).status_code, 429)
+        settings.google_client_secret = ''
+        self.assertEqual(self.client.post('/api/auth/google/start', headers=self.headers).status_code, 503)
+
+    def test_missing_encryption_key_fails_before_cloud_consent(self):
+        self.login()
+        settings.credential_encryption_key = ''
+        self.assertEqual(self.client.post(f'/api/workspaces/{self.workspace()}/connections/gcp/start', headers=self.headers).status_code, 503)
+        with Session(self.engine) as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(OAuthAttempt)), 0)
+
+    def test_viewer_cannot_create_or_disconnect_connections(self):
+        self.login()
+        workspace = self.workspace()
+        connection = self.connect()
+        with Session(self.engine) as db:
+            db.scalar(select(Membership)).role = 'viewer'
+            db.commit()
+        self.assertEqual(self.client.post(f'/api/workspaces/{workspace}/connections/gcp/start', headers=self.headers).status_code, 403)
+        self.assertEqual(self.client.delete('/api/connections/' + connection['id'], headers=self.headers).status_code, 403)
+
+    def test_plain_http_nonlocal_origins_and_insecure_https_are_rejected(self):
+        settings.public_url = 'http://example.com'
+        self.assertEqual(self.client.post('/api/auth/google/start', headers=self.headers).status_code, 503)
+        settings.public_url = 'https://example.com'
+        self.assertEqual(self.client.post('/api/auth/google/start', headers=self.headers).status_code, 503)
+        settings.session_cookie_secure = True
+        response = self.client.post('/api/auth/google/start', headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Secure', response.headers['set-cookie'])
+
+    def test_password_routes_are_removed_and_demo_cannot_scan(self):
+        self.login()
+        for path in ['signup', 'login', 'forgot-password']:
+            self.assertEqual(self.client.post('/api/auth/' + path, headers=self.headers, json={}).status_code, 404)
+        with Session(self.engine) as db:
+            db.scalar(select(User)).is_demo = True
+            db.commit()
+        self.assertEqual(self.client.get('/api/auth/me').json()['user']['sample_workspace']['sampleMode'], True)
+        self.assertEqual(self.client.post(f'/api/workspaces/{self.workspace()}/connections/gcp/start', headers=self.headers).status_code, 403)
+        self.assertEqual(self.client.get('/api/v1/scan/my-project?connection_id=missing').status_code, 403)
 
 
 if __name__ == '__main__':
-    unittest.main()
+    main()

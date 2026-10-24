@@ -77,6 +77,10 @@ def _hierarchy_to_response(hierarchy: LoadBalancerHierarchy) -> LoadBalancerHier
 
 
 class ScanOrchestrator:
+    def __init__(self, credentials, principal_email: str):
+        self.credentials = credentials
+        self.principal_email = principal_email
+
     def run(self, project_id: str, on_log: LogCallback | None = None) -> ScanResponse:
         logs: list[str] = []
 
@@ -85,7 +89,7 @@ class ScanOrchestrator:
             if on_log is not None:
                 on_log(message)
 
-        permission_checker = LbPermissionChecker()
+        permission_checker = LbPermissionChecker(self.credentials, self.principal_email)
         preflight_result = permission_checker.check(project_id, on_log=emit)
         preflight_response = build_preflight_response(preflight_result, logs=logs)
 
@@ -108,10 +112,10 @@ class ScanOrchestrator:
         emit("All permission granted. Now running the scanner.")
 
         try:
-            scanner = ExternalLbScanner()
+            scanner = ExternalLbScanner(self.credentials)
             scan_result = scanner.scan(project_id, on_log=emit)
         except Exception as exc:
-            message = f"Scanner failed: {exc}"
+            message = "Scanner failed. Check your connection, enabled APIs, and project access."
             emit(message)
             return ScanResponse(
                 project_id=project_id,

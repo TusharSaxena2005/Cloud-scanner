@@ -2,10 +2,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app.services.gcp_credentials import (
-    load_scanner_credentials,
-    resolve_credentials_identity,
-)
 from app.services.permission_preflight import (
     LogCallback,
     PermissionPreflightChecker,
@@ -27,9 +23,9 @@ class LbPermissionCheckResult:
 
 
 class LbPermissionChecker:
-    def __init__(self) -> None:
-        self._credentials = load_scanner_credentials()
-        self._service_account_email, _ = resolve_credentials_identity(self._credentials)
+    def __init__(self, credentials, principal_email: str) -> None:
+        self._credentials = credentials
+        self._service_account_email = principal_email
         self._manifest = load_permission_manifest()
 
     def check(
