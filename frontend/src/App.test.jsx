@@ -6,8 +6,8 @@ import Flow from './Flow.jsx';
 import Backends from './Backends.jsx';
 import Drawer from './Drawer.jsx';
 import { patchState } from './store.js';
-import { fetchConnections, fetchWorkspaces, streamPermissions, streamScan, currentUser } from './api.js';
-vi.mock('./api.js', () => ({ fetchConnections: vi.fn(), fetchWorkspaces: vi.fn(), streamPermissions: vi.fn(), streamScan: vi.fn(), currentUser: vi.fn(), signOut: vi.fn(), beginGoogleSignIn: vi.fn() }));
+import { fetchConnections, fetchWorkspaces, streamPermissions, streamScan, currentUser, loginDemo } from './api.js';
+vi.mock('./api.js', () => ({ fetchConnections: vi.fn(), fetchWorkspaces: vi.fn(), streamPermissions: vi.fn(), streamScan: vi.fn(), currentUser: vi.fn(), signOut: vi.fn(), beginGoogleSignIn: vi.fn(), loginDemo: vi.fn() }));
 afterEach(cleanup);
 beforeEach(() => {
   vi.resetAllMocks();
@@ -119,4 +119,38 @@ test('all protected resources show an explicit empty result', () => {
   render(<Backends state={protectedState} onSelect={() => {}} />);
   expect(screen.getByText('No unprotected backends found.')).toBeTruthy();
   expect(screen.queryByText('safe')).toBeNull();
+});
+
+test('logging in with demo account shows demo workspace notice and sample resources', async () => {
+  const unauthError = new Error('Please sign in to continue.');
+  unauthError.status = 401;
+  currentUser.mockRejectedValue(unauthError);
+  location.hash = '#/login';
+  const demoWorkspace = {
+    sampleMode: true,
+    scopeType: 'project',
+    scopeId: 'all-projects',
+    projects: [
+      { scopeId: 'demo-proj-1', scanResult: { load_balancers: [] } },
+      { scopeId: 'demo-proj-2', scanResult: { load_balancers: [] } },
+    ],
+    scanResult: { project_id: 'all-projects', load_balancers: [] },
+  };
+  loginDemo.mockResolvedValue({
+    user: { id: 'demo-user-id', name: 'Demo User', email: 'demo@cloudscanner.local', is_demo: true, sample_workspace: demoWorkspace },
+  });
+  render(<App />);
+  const demoBtn = await screen.findByRole('button', { name: 'Continue with Demo Account' });
+  fireEvent.click(demoBtn);
+  await screen.findByText('Demo workspace');
+  expect(screen.getByText('Demo project')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Continue with Demo Account' })).toBeNull();
+});
+
+test('first page defaults to Dashboard and displays Cloud Security Posture overview', async () => {
+  location.hash = '';
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Cloud Security Posture' });
+  const dashboardNav = screen.getByRole('link', { name: 'Dashboard' });
+  expect(dashboardNav.classList.contains('active')).toBe(true);
 });

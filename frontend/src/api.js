@@ -75,6 +75,7 @@ export async function authRequest(path, options = {}) {
   return data;
 }
 export const beginGoogleSignIn = () => authRequest('google/start', { method: 'POST' });
+export const loginDemo = () => authRequest('demo', { method: 'POST' });
 export const currentUser = () => authRequest('me');
 export const signOut = () => authRequest('logout', { method: 'POST' });
 export const updateProfile = values => authRequest('profile', { method: 'PATCH', body: JSON.stringify(values) });

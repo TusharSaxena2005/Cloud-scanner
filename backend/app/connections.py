@@ -229,7 +229,7 @@ def callback(request: Request, state: str = "", code: str = "", error: str = "",
         if attempt.purpose == "login":
             user = create_google_user(db, claims)
             response = finish()
-            response.headers["Location"] = settings.public_url.rstrip("/") + "/#/scanner"
+            response.headers["Location"] = settings.public_url.rstrip("/") + "/#/dashboard"
             start_session(user, request, response, db)
             return response
         if claims["sub"] != user.google_sub:

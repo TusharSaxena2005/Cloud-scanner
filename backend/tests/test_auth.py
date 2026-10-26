@@ -62,7 +62,7 @@ class AuthTests(TestCase):
     def login(self):
         response = self.finish(self.start())
         self.assertEqual(response.status_code, 303, response.text)
-        self.assertIn('/#/scanner', response.headers['location'])
+        self.assertIn('/#/dashboard', response.headers['location'])
         return self.client.get('/api/auth/me').json()['user']
 
     def workspace(self):
@@ -286,6 +286,24 @@ class AuthTests(TestCase):
         self.assertEqual(self.client.get('/api/auth/me').json()['user']['sample_workspace']['sampleMode'], True)
         self.assertEqual(self.client.post(f'/api/workspaces/{self.workspace()}/connections/gcp/start', headers=self.headers).status_code, 403)
         self.assertEqual(self.client.get('/api/v1/scan/my-project?connection_id=missing').status_code, 403)
+
+    def test_demo_account_login(self):
+        self.assertEqual(self.client.post('/api/auth/demo').status_code, 403)
+        response = self.client.post('/api/auth/demo', headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['user']['is_demo'])
+        self.assertEqual(data['user']['name'], 'Demo User')
+        self.assertIsNotNone(data['user']['sample_workspace'])
+        self.assertTrue(data['user']['sample_workspace']['sampleMode'])
+        self.assertEqual(data['user']['sample_workspace']['scopeId'], 'all-projects')
+        self.assertIn(COOKIE, self.client.cookies)
+        me_resp = self.client.get('/api/auth/me')
+        self.assertEqual(me_resp.status_code, 200)
+        self.assertTrue(me_resp.json()['user']['is_demo'])
+        second_resp = self.client.post('/api/auth/demo', headers=self.headers)
+        self.assertEqual(second_resp.status_code, 200)
+        self.assertEqual(second_resp.json()['user']['id'], data['user']['id'])
 
 
 if __name__ == '__main__':

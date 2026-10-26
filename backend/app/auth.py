@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 
 from app.config import settings
-from app.database import BrowserSession, Membership, User, Workspace, get_db, now
+from app.database import BrowserSession, Membership, User, Workspace, get_db, now, uid
 from app.demo import sample_workspace
 
 COOKIE = "cloudscanner_session"
@@ -26,7 +26,7 @@ def csrf_guard(request: Request):
 
 def public_user(user):
     return {"id": user.id, "name": user.name, "email": user.email,
-            "auth_provider": "google", "is_demo": user.is_demo,
+            "auth_provider": "demo" if user.is_demo else "google", "is_demo": user.is_demo,
             "sample_workspace": sample_workspace() if user.is_demo else None}
 
 
@@ -81,6 +81,31 @@ def create_google_user(db, claims):
     else:
         user.email = claims["email"]
     return user
+
+
+@router.post("/demo", dependencies=[Depends(csrf_guard)])
+def login_demo(request: Request, response: Response, db=Depends(get_db)):
+    user = db.scalar(select(User).where(User.google_sub == "demo-sub"))
+    if user is None:
+        user = User(id=uid(), google_sub="demo-sub", email="demo@cloudscanner.local",
+                    name="Demo User", is_demo=True)
+        db.add(user)
+        db.flush()
+        workspace = Workspace(name="Demo Workspace")
+        db.add(workspace)
+        db.flush()
+        db.add(Membership(user_id=user.id, workspace_id=workspace.id, role="viewer"))
+    else:
+        user.is_demo = True
+        membership = db.scalar(select(Membership).where(Membership.user_id == user.id))
+        if membership is None:
+            workspace = Workspace(name="Demo Workspace")
+            db.add(workspace)
+            db.flush()
+            db.add(Membership(user_id=user.id, workspace_id=workspace.id, role="viewer"))
+    db.commit()
+    start_session(user, request, response, db)
+    return {"user": public_user(user)}
 
 
 @router.get("/me")
