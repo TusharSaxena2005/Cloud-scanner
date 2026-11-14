@@ -24,6 +24,23 @@ export async function streamScan(projectId, connectionId, onLog) {
   return consumeSse(response, onLog);
 }
 
+export async function streamScopeScan(scopeType, scopeId, connectionId, onLog) {
+  const response = await fetch(
+    `/api/v1/scan/scope/stream?connection_id=${encodeURIComponent(connectionId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope_type: scopeType, scope_id: scopeId }),
+    }
+  );
+  if (response.status === 401 && !response.url?.includes("/auth/")) window.dispatchEvent(new Event("session-expired"));
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || "Scope scan failed.");
+  }
+  return consumeSse(response, onLog);
+}
+
 async function consumeSse(response, onLog) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();

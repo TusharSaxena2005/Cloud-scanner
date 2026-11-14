@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useSyncExternalStore } from 'react';
-import { getState, subscribe, patchState, resetState, selectCloudConnection } from './store.js';
+import { getState, subscribe, patchState, activateUser, deactivateUser, selectCloudConnection } from './store.js';
 import { fetchConnections, fetchWorkspaces, currentUser, signOut } from './api.js';
 import { Status } from './components.jsx';
 import Dashboard from './Dashboard.jsx';
@@ -24,9 +24,9 @@ export default function App() {
   useEffect(() => {
     const change = () => { setRoute(currentRoute()); setDrawer(null); };
     window.addEventListener('hashchange', change);
-    resetState();
-    currentUser().then(result => { if (result.user.sample_workspace) patchState(result.user.sample_workspace); setUser(result.user); }).catch(err => { if (err.status !== 401) setError(err.message); }).finally(() => setLoading(false));
-    const expired = () => { resetState(); setUser(null); setDrawer(null); location.hash = '#/login'; };
+    deactivateUser();
+    currentUser().then(result => { activateUser(result.user.id); if (result.user.sample_workspace) patchState(result.user.sample_workspace); setUser(result.user); }).catch(err => { if (err.status !== 401) setError(err.message); }).finally(() => setLoading(false));
+    const expired = () => { deactivateUser(); setUser(null); setDrawer(null); location.hash = '#/login'; };
     window.addEventListener('session-expired', expired);
     return () => { window.removeEventListener('hashchange', change); window.removeEventListener('session-expired', expired); };
   }, []);
@@ -36,17 +36,20 @@ export default function App() {
     Promise.all([fetchConnections(), fetchWorkspaces()]).then(([cloud, work]) => {
       if (!active) return;
       patchState({ connections: cloud.connections, workspaces: work.workspaces });
-      selectCloudConnection(cloud.connections[0]?.id || '');
+      if (!cloud.connections.some(connection => connection.id === getState().connectionId)) {
+        selectCloudConnection(cloud.connections[0]?.id || '', { preserveResults: true });
+      }
     }).catch(err => { if (active) setError(err.message); });
     return () => { active = false; };
   }, [user?.id]);
   async function logout() {
     setLoggingOut(true);
-    try { await signOut(); resetState(); setUser(null); setDrawer(null); location.hash = '#/login'; }
+    try { await signOut(); deactivateUser(); setUser(null); setDrawer(null); location.hash = '#/login'; }
     catch (err) { setError(err.message); }
     finally { setLoggingOut(false); }
   }
   function handleAuthenticated(authenticatedUser) {
+    activateUser(authenticatedUser.id);
     if (authenticatedUser.sample_workspace) patchState(authenticatedUser.sample_workspace);
     setUser(authenticatedUser);
     setRoute('dashboard');

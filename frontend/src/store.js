@@ -1,4 +1,4 @@
-const STORAGE_KEY = "cloud-armor-scanner-state";
+const STORAGE_PREFIX = "cloud-armor-scanner-state";
 
 const defaultState = {
   scopeType: "project",
@@ -15,12 +15,17 @@ const defaultState = {
   scanLogs: "",
 };
 
-let state = loadState();
+let activeUserId = null;
+let state = { ...defaultState };
 const listeners = new Set();
 
-function loadState() {
+function storageKey(userId) {
+  return `${STORAGE_PREFIX}:${encodeURIComponent(userId)}`;
+}
+
+function loadState(userId) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey(userId));
     const saved = raw ? { ...defaultState, ...JSON.parse(raw) } : { ...defaultState };
     if (["checking", "scanning"].includes(saved.scanStatus)) saved.scanStatus = "idle";
     return saved;
@@ -30,11 +35,13 @@ function loadState() {
 }
 
 function persist() {
+  if (!activeUserId) return;
   localStorage.setItem(
-    STORAGE_KEY,
+    storageKey(activeUserId),
     JSON.stringify({
       scopeType: state.scopeType,
       scopeId: state.scopeId,
+      connectionId: state.connectionId,
       preflight: state.preflight,
       scanResult: state.scanResult,
       lastScanTime: state.lastScanTime,
@@ -53,6 +60,21 @@ export function getState() {
 export function subscribe(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+export function activateUser(userId) {
+  if (activeUserId === userId) return;
+  sessionEpoch += 1;
+  activeUserId = userId;
+  state = { ...defaultState, ...loadState(userId) };
+  listeners.forEach(listener => listener(state));
+}
+
+export function deactivateUser() {
+  sessionEpoch += 1;
+  activeUserId = null;
+  state = { ...defaultState };
+  listeners.forEach(listener => listener(state));
 }
 
 export function patchState(partial) {
@@ -128,13 +150,27 @@ export const getSessionEpoch = () => sessionEpoch;
 
 export function resetState() {
   sessionEpoch += 1;
+  if (activeUserId) {
+    try { localStorage.removeItem(storageKey(activeUserId)); } catch { /* Storage may be disabled. */ }
+  }
+  activeUserId = null;
   state = { ...defaultState };
-  try { localStorage.removeItem(STORAGE_KEY); } catch { /* Storage may be disabled. */ }
   listeners.forEach(listener => listener(state));
 }
 
-export function selectCloudConnection(connectionId) {
+export function selectCloudConnection(connectionId, { preserveResults = false } = {}) {
+  if (connectionId === state.connectionId) return;
   sessionEpoch += 1;
-  patchState({ connectionId, scopeId: '', preflight: null, scanResult: null,
-    scanLogs: '', scanStatus: 'idle', lastScanTime: null, scanDurationMs: null });
+  patchState({
+    connectionId,
+    scopeId: '',
+    preflight: null,
+    scanLogs: '',
+    ...(!preserveResults && {
+      scanResult: null,
+      scanStatus: 'idle',
+      lastScanTime: null,
+      scanDurationMs: null,
+    }),
+  });
 }

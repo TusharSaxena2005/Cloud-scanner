@@ -34,6 +34,7 @@ class BackendServiceNode:
 @dataclass
 class LoadBalancerHierarchy:
     forwarding_rule: ResourceNode
+    project_id: str | None = None
     target_proxy: ResourceNode | None = None
     url_map: ResourceNode | None = None
     backend_services: list[BackendServiceNode] = field(default_factory=list)
@@ -46,6 +47,8 @@ class ScanResult:
     project: ResourceNode | None
     load_balancers: list[LoadBalancerHierarchy]
     logs: list[str] = field(default_factory=list)
+    projects: list[ResourceNode] = field(default_factory=list)
+    failed_projects: list[dict[str, str]] = field(default_factory=list)
 
 
 class ExternalLbScanner:
@@ -54,28 +57,69 @@ class ExternalLbScanner:
         self._logs: list[str] = []
 
     def scan(self, project_id: str, on_log: LogCallback | None = None) -> ScanResult:
+        return self.scan_projects([project_id], on_log=on_log)
+
+    def scan_projects(
+        self,
+        project_ids: list[str],
+        on_log: LogCallback | None = None,
+        continue_on_project_error: bool = False,
+    ) -> ScanResult:
         self._logs = []
         self._on_log = on_log
 
-        self._log(f"Starting external load balancer discovery for project '{project_id}'")
-        project = self._get_project(project_id)
+        if not project_ids:
+            raise ValueError("No accessible projects are available to scan.")
 
-        forwarding_rules = self._discover_external_forwarding_rules(project_id)
-        self._log(f"Found {len(forwarding_rules)} public external forwarding rule(s)")
+        self._log(f"Fetching all {len(project_ids)} project resources")
+        projects = []
+        for project_id in project_ids:
+            self._log(f"Fetching project resource '{project_id}'")
+            projects.append(self._get_project(project_id))
 
-        hierarchies: list[LoadBalancerHierarchy] = []
-        for index, rule in enumerate(forwarding_rules, start=1):
+        project_rules: list[tuple[str, compute_v1.ForwardingRule]] = []
+        failed_projects: list[dict[str, str]] = []
+        self._log("Listing forwarding rules across all accessible projects")
+        for project_id in project_ids:
+            self._log(f"Listing forwarding rules for project '{project_id}'")
+            try:
+                rules = self._discover_external_forwarding_rules(project_id)
+            except google_exceptions.GoogleAPIError as exc:
+                if not continue_on_project_error:
+                    raise
+                failed_projects.append({"project_id": project_id, "reason": str(exc)})
+                self._log(f"Skipping project '{project_id}' after forwarding rule listing failed: {exc}")
+                continue
+            self._log(f"Found {len(rules)} public external forwarding rule(s) in '{project_id}'")
+            project_rules.extend((project_id, rule) for rule in rules)
+
+        self._log(f"Resolving target proxies for {len(project_rules)} forwarding rule(s)")
+        hierarchies = [
+            (project_id, rule, self._new_hierarchy(project_id, rule))
+            for project_id, rule in project_rules
+        ]
+        for project_id, rule, hierarchy in hierarchies:
             self._log(
-                f"[{index}/{len(forwarding_rules)}] Building hierarchy for forwarding rule '{rule.name}'"
+                f"Resolving target proxy for '{rule.name}' in project '{project_id}'"
             )
-            hierarchies.append(self._build_hierarchy(project_id, rule))
+            self._resolve_hierarchy_target_proxy(rule, hierarchy)
+
+        self._log("Resolving URL maps across all target proxies")
+        for _, _, hierarchy in hierarchies:
+            self._resolve_hierarchy_url_map(hierarchy)
+
+        self._log("Resolving backend services and Cloud Armor policies")
+        for _, _, hierarchy in hierarchies:
+            self._resolve_hierarchy_backends(hierarchy)
 
         self._log("Resource discovery complete")
         return ScanResult(
-            project_id=project_id,
-            project=project,
-            load_balancers=hierarchies,
+            project_id=project_ids[0] if len(project_ids) == 1 else "",
+            project=projects[0] if len(projects) == 1 else None,
+            load_balancers=[hierarchy for _, _, hierarchy in hierarchies],
             logs=self._logs,
+            projects=projects,
+            failed_projects=failed_projects,
         )
 
     def _log(self, message: str) -> None:
@@ -205,7 +249,7 @@ class ExternalLbScanner:
 
         return True, ""
 
-    def _build_hierarchy(
+    def _new_hierarchy(
         self,
         project_id: str,
         rule: compute_v1.ForwardingRule,
@@ -226,26 +270,38 @@ class ExternalLbScanner:
                     "port_range": rule.port_range,
                     "target": rule.target,
                 },
-            )
+            ),
+            project_id=project_id,
         )
-
         if not rule.target:
             hierarchy.warnings.append("Forwarding rule has no target proxy")
-            return hierarchy
+        return hierarchy
 
+    def _resolve_hierarchy_target_proxy(
+        self,
+        rule: compute_v1.ForwardingRule,
+        hierarchy: LoadBalancerHierarchy,
+    ) -> None:
+        if not rule.target:
+            return
         target_proxy = self._resolve_target_proxy(rule.target)
         hierarchy.target_proxy = target_proxy
         if target_proxy.error or not target_proxy.details.get("url_map"):
             hierarchy.warnings.append("Could not resolve URL map from target proxy")
-            return hierarchy
 
-        url_map_link = str(target_proxy.details["url_map"])
-        url_map = self._resolve_url_map(url_map_link)
+    def _resolve_hierarchy_url_map(self, hierarchy: LoadBalancerHierarchy) -> None:
+        target_proxy = hierarchy.target_proxy
+        if not target_proxy or target_proxy.error or not target_proxy.details.get("url_map"):
+            return
+        url_map = self._resolve_url_map(str(target_proxy.details["url_map"]))
         hierarchy.url_map = url_map
         if url_map.error:
             hierarchy.warnings.append(f"URL map resolution failed: {url_map.error}")
-            return hierarchy
 
+    def _resolve_hierarchy_backends(self, hierarchy: LoadBalancerHierarchy) -> None:
+        url_map = hierarchy.url_map
+        if not url_map or url_map.error:
+            return
         backend_links = self._extract_backend_service_links(url_map.details)
         if not backend_links:
             hierarchy.warnings.append("No backend services referenced by URL map")
@@ -269,8 +325,6 @@ class ExternalLbScanner:
                     security_policy=security_policy_node,
                 )
             )
-
-        return hierarchy
 
     def _resolve_target_proxy(self, target_link: str) -> ResourceNode:
         ref = parse_gcp_self_link(target_link)

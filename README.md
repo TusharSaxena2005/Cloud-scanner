@@ -10,10 +10,13 @@ Cloud security visibility with Google Sign-In, PostgreSQL workspaces, and indepe
 - Workspace membership checks on every connection, preflight, and scan request.
 - Encrypted refresh tokens, hashed browser session tokens, OAuth state/nonce/PKCE protection, and rate-limited OAuth starts.
 - Permission preflight, live scan progress, coverage summary, backend filters, expandable resource flow, and resource inspector.
+- Scan results are cached in the browser per signed-in user and restored on a later sign-in. Disconnecting a cloud account preserves the last completed results until another scan replaces them; deliberately switching scan connections clears results tied to the previous selection.
 - Editable display name; email and passwords are managed by Google.
 - Provider-neutral connections; AWS and Azure are displayed as future providers. Their credentials and scanners are **not implemented**.
 
 Website login and cloud permissions are separate. Google Sign-In alone cannot scan projects. The user must approve Google Cloud read access and already have the IAM permissions listed in `backend/config/lb_permissions.yaml`. OAuth consent never grants additional IAM roles.
+
+Project scans verify all scanner permissions in the project. Folder and organization scans first enumerate descendant folders and projects with Resource Manager, then check project scanner permissions and scan resources in project-wide phases (forwarding rules across projects before resolving proxies, URL maps, and backends). The connected identity needs `resourcemanager.projects.list` on the selected parent and `resourcemanager.folders.list` on each parent to enumerate descendants; inaccessible projects and folders are reported and skipped where traversal can continue.
 
 ## Local setup (PowerShell)
 
@@ -60,9 +63,9 @@ In your Google Cloud project:
 3. Register this exact redirect URI for local development:
    `http://127.0.0.1:5173/api/oauth/google/callback`
 4. Put the client ID and secret in the backend environment.
-5. Configure identity scopes (`openid`, `email`, `profile`) and Google Cloud read access (`https://www.googleapis.com/auth/cloud-platform.read-only`).
+5. Configure identity scopes (`openid`, `email`, `profile`) and Google Cloud read access (`https://www.googleapis.com/auth/cloud-platform.read-only` and `https://www.googleapis.com/auth/compute.readonly`).
 
-The app uses a backend authorization-code redirect flow. The frontend never receives access or refresh tokens. Register each deployment's callback URI exactly; it is always `${PUBLIC_URL}/api/oauth/google/callback`.
+The app uses a backend authorization-code redirect flow. The frontend never receives access or refresh tokens. Compute Engine discovery uses the read-only `compute.readonly` OAuth scope; project IAM permissions are still required, and OAuth scopes do not grant IAM roles. After adding this scope to an existing deployment, reconnect the GCP account and approve the updated consent request. Register each deployment's callback URI exactly; it is always `${PUBLIC_URL}/api/oauth/google/callback`.
 
 Google may require OAuth verification before public use of sensitive scopes. External apps in testing can have short-lived refresh grants; reconnect when Google expires or revokes access. Organization policies can also block user consent. See [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server) and [verification guidance](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification).
 

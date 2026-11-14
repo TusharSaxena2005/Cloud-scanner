@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import logging
 
 from app.models.schemas import (
     BackendServiceHierarchyResponse,
@@ -16,6 +17,8 @@ from app.services.external_lb_scanner import (
 )
 from app.services.lb_permission_checker import LbPermissionChecker, LbPermissionCheckResult
 from app.services.permission_preflight import LogCallback
+
+logger = logging.getLogger(__name__)
 
 
 def build_preflight_response(
@@ -62,6 +65,7 @@ def _hierarchy_to_response(hierarchy: LoadBalancerHierarchy) -> LoadBalancerHier
 
     return LoadBalancerHierarchyResponse(
         forwarding_rule=forwarding_rule,
+        project_id=hierarchy.project_id,
         target_proxy=_resource_node_to_response(hierarchy.target_proxy),
         url_map=_resource_node_to_response(hierarchy.url_map),
         backend_services=[
@@ -114,7 +118,11 @@ class ScanOrchestrator:
         try:
             scanner = ExternalLbScanner(self.credentials)
             scan_result = scanner.scan(project_id, on_log=emit)
-        except Exception as exc:
+        except Exception:
+            logger.exception(
+                "External load balancer scan failed for project %s",
+                project_id,
+            )
             message = "Scanner failed. Check your connection, enabled APIs, and project access."
             emit(message)
             return ScanResponse(

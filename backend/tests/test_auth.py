@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.auth import COOKIE, token_hash, create_google_user
 from app.config import settings
-from app.connections import GCP_SCOPE, seal, unseal, verify_identity
+from app.connections import COMPUTE_READONLY_SCOPE, GCP_SCOPE, GCP_SCOPES, seal, unseal, verify_identity
 from app.database import Base, User, Workspace, Membership, BrowserSession, OAuthAttempt, CloudConnection, get_db, now
 from app.main import app
 
@@ -40,7 +40,7 @@ class AuthTests(TestCase):
         settings.credential_encryption_key = Fernet.generate_key().decode()
         settings.session_cookie_secure = False
         self.claims = {'sub': 'google-sub-1', 'email': 'one@example.com', 'email_verified': True, 'name': 'User One'}
-        self.exchange = patch('app.connections.exchange_code', return_value={'id_token': 'verified-token', 'refresh_token': 'secret-refresh', 'scope': 'openid email profile ' + GCP_SCOPE}).start()
+        self.exchange = patch('app.connections.exchange_code', return_value={'id_token': 'verified-token', 'refresh_token': 'secret-refresh', 'scope': 'openid email profile ' + ' '.join(GCP_SCOPES)}).start()
         self.identity = patch('app.connections.verify_identity', side_effect=lambda token, nonce: dict(self.claims)).start()
         self.addCleanup(patch.stopall)
 
@@ -145,12 +145,17 @@ class AuthTests(TestCase):
 
     def test_connection_credentials_are_encrypted_and_not_public(self):
         self.login()
-        connection = self.connect()
+        params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
+        self.assertEqual(set(params['scope'][0].split()) & set(GCP_SCOPES), set(GCP_SCOPES))
+        response = self.finish(params)
+        self.assertNotIn('oauth_error', response.headers['location'])
+        connection = self.client.get('/api/connections').json()['connections'][0]
         self.assertEqual(connection['provider'], 'gcp')
         with Session(self.engine) as db:
             stored = db.get(CloudConnection, connection['id'])
             self.assertNotIn('secret-refresh', stored.encrypted_credentials)
             self.assertEqual(unseal(stored.encrypted_credentials)['refresh_token'], 'secret-refresh')
+            self.assertEqual(set(stored.scopes.split()) & set(GCP_SCOPES), set(GCP_SCOPES))
         self.assertNotIn('secret-refresh', self.client.get('/api/connections').text)
         self.assertNotIn('encrypted_credentials', self.client.get('/api/connections').text)
         self.assertEqual(len(self.client.get('/api/connections').json()['providers']), 3)
@@ -161,6 +166,9 @@ class AuthTests(TestCase):
         params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
         self.assertIn('oauth_error', self.finish(params).headers['location'])
         self.exchange.return_value['scope'] += ' ' + GCP_SCOPE
+        params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
+        self.assertIn('oauth_error', self.finish(params).headers['location'])
+        self.exchange.return_value['scope'] += ' ' + COMPUTE_READONLY_SCOPE
         params = self.start(f'/api/workspaces/{self.workspace()}/connections/gcp/start')
         self.claims['sub'] = 'different-account'
         self.assertIn('oauth_error', self.finish(params).headers['location'])
@@ -200,6 +208,7 @@ class AuthTests(TestCase):
             refresh.assert_called_once()
             credentials, label = orchestrator.call_args.args
             self.assertEqual(credentials.refresh_token, 'secret-refresh')
+            self.assertEqual(set(credentials.scopes), set(GCP_SCOPES))
             self.assertEqual(label, 'one@example.com')
         with patch('app.services.scan_orchestrator.LbPermissionChecker') as checker, patch('app.services.scan_orchestrator.ExternalLbScanner') as scanner:
             from app.services.scan_orchestrator import ScanOrchestrator
@@ -208,6 +217,58 @@ class AuthTests(TestCase):
             self.assertEqual(ScanOrchestrator(credentials, 'user').run('my-project').status, 'blocked')
             checker.assert_called_once_with(credentials, 'user')
             scanner.assert_not_called()
+
+    def test_scope_scan_stream_uses_selected_connection(self):
+        self.login()
+        connection = self.connect()
+        result = Mock(model_dump=lambda: {
+            'project_id': '123456789',
+            'scope_type': 'folder',
+            'status': 'completed',
+            'project_ids': ['child-project'],
+            'scanned_project_ids': ['child-project'],
+            'load_balancers': [],
+        })
+        with patch('app.connections.Credentials.refresh'), \
+                patch('app.main.ScopeScanOrchestrator') as orchestrator:
+            orchestrator.return_value.run.return_value = result
+            response = self.client.post(
+                f'/api/v1/scan/scope/stream?connection_id={connection["id"]}',
+                json={'scope_type': 'folder', 'scope_id': '123456789'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"status": "completed"', response.text)
+        orchestrator.return_value.run.assert_called_once()
+
+    def test_scan_failure_logs_google_api_error_details(self):
+        from app.services.scan_orchestrator import ScanOrchestrator
+
+        checker_result = Mock(
+            project_id='my-project',
+            service_account_email='user@example.com',
+            all_permissions_granted=True,
+            permissions=[],
+            missing_permissions=[],
+            invalid_permissions=[],
+            message='All required permissions are granted.',
+            logs=[],
+        )
+        with patch('app.services.scan_orchestrator.LbPermissionChecker') as checker, \
+                patch('app.services.scan_orchestrator.ExternalLbScanner') as scanner:
+            checker.return_value.check.return_value = checker_result
+            scanner.return_value.scan.side_effect = RuntimeError(
+                '403 Forbidden: compute.globalForwardingRules.list is denied'
+            )
+
+            with self.assertLogs('app.services.scan_orchestrator', level='ERROR') as captured:
+                result = ScanOrchestrator(object(), 'user@example.com').run('my-project')
+
+        self.assertEqual(result.status, 'failed')
+        self.assertTrue(any(
+            'compute.globalForwardingRules.list is denied' in message
+            for message in captured.output
+        ))
 
     def test_revoked_tokens_require_reconnect_and_disconnect_removes_access(self):
         from google.auth.exceptions import RefreshError

@@ -13,7 +13,7 @@ class GcpResourceRef:
 
 _RESOURCE_PATTERN = re.compile(
     r"projects/(?P<project>[^/]+)"
-    r"(?:/regions/(?P<region>[^/]+))?"
+    r"(?:/regions/(?P<region>[^/]+)|/global)?"
     r"/(?P<resource_type>[a-zA-Z]+)/(?P<name>[^/]+)$"
 )
 

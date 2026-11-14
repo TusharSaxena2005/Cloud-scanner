@@ -2,13 +2,14 @@ import React from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import App from './App.jsx';
+import Dashboard from './Dashboard.jsx';
 import Flow from './Flow.jsx';
 import Backends from './Backends.jsx';
 import Drawer from './Drawer.jsx';
-import { patchState } from './store.js';
-import { fetchConnections, fetchWorkspaces, streamPermissions, streamScan, currentUser, loginDemo } from './api.js';
-vi.mock('./api.js', () => ({ fetchConnections: vi.fn(), fetchWorkspaces: vi.fn(), streamPermissions: vi.fn(), streamScan: vi.fn(), currentUser: vi.fn(), signOut: vi.fn(), beginGoogleSignIn: vi.fn(), loginDemo: vi.fn() }));
-afterEach(cleanup);
+import { patchState, resetState } from './store.js';
+import { fetchConnections, fetchWorkspaces, streamPermissions, streamScan, streamScopeScan, currentUser, loginDemo } from './api.js';
+vi.mock('./api.js', () => ({ fetchConnections: vi.fn(), fetchWorkspaces: vi.fn(), streamPermissions: vi.fn(), streamScan: vi.fn(), streamScopeScan: vi.fn(), currentUser: vi.fn(), signOut: vi.fn(), beginGoogleSignIn: vi.fn(), loginDemo: vi.fn() }));
+afterEach(() => { cleanup(); resetState(); localStorage.clear(); });
 beforeEach(() => {
   vi.resetAllMocks();
   currentUser.mockResolvedValue({ user: { id: 'test', name: 'Test User', email: 'test@example.com' } });
@@ -18,11 +19,82 @@ beforeEach(() => {
   patchState({ scopeType: 'project', scopeId: '', preflight: null, scanResult: null, scanStatus: 'idle', scanLogs: '', lastScanTime: null });
 });
 const state = { scanResult: { project_id: 'demo-project', load_balancers: [{ forwarding_rule: { name: 'public-lb', details: { ip_address: '1.2.3.4' } }, backend_services: [{ backend_service: { name: 'protected-api' }, security_policy: { name: 'armor-policy' } }, { backend_service: { name: 'exposed-api' } }] }] } };
+test('dashboard inspection identifies the backend service in the resource drawer', () => {
+  const onInspectResource = vi.fn();
+  const { unmount } = render(<Dashboard state={state} onInspectResource={onInspectResource} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
+  const resource = onInspectResource.mock.calls[0][0];
+  expect(resource).toEqual(expect.objectContaining({
+    type: 'Backend Service',
+    name: 'exposed-api',
+    status: 'UNPROTECTED',
+  }));
+  unmount();
+  const { container } = render(<Drawer resource={resource} onClose={() => {}} />);
+  expect(container.querySelector('.drawer-type').textContent).toBe('Backend Service');
+  expect(screen.getByText('Resource hierarchy')).toBeTruthy();
+});
+
+test('dashboard resource hierarchy includes target proxy and URL map', () => {
+  const onInspectResource = vi.fn();
+  const hierarchyState = {
+    scanResult: {
+      project_id: 'demo-project',
+      load_balancers: [{
+        forwarding_rule: { name: 'frontend-shop' },
+        target_proxy: { name: 'juice-shop-lb-target-proxy' },
+        url_map: { name: 'juice-shop-lb' },
+        backend_services: [{ backend_service: { name: 'shop-service' } }],
+      }],
+    },
+  };
+
+  render(<Dashboard state={hierarchyState} onInspectResource={onInspectResource} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
+
+  expect(onInspectResource.mock.calls[0][0].chain).toContainEqual([
+    'Target Proxy',
+    'juice-shop-lb-target-proxy',
+  ]);
+  expect(onInspectResource.mock.calls[0][0].chain).toContainEqual([
+    'URL Map',
+    'juice-shop-lb',
+  ]);
+});
+
+test('dashboard policy summary explains service and policy counts clearly', () => {
+  const policyState = {
+    scanResult: {
+      project_id: 'demo-project',
+      load_balancers: [{
+        forwarding_rule: { name: 'public-lb' },
+        backend_services: [
+          {
+            backend_service: { name: 'protected-api' },
+            security_policy: { name: 'backend-waf', details: { rules: [{ preview: true }] } },
+            edge_security_policy: { name: 'edge-waf' },
+          },
+          { backend_service: { name: 'exposed-api' } },
+        ],
+      }],
+    },
+  };
+  render(<Dashboard state={policyState} />);
+  expect(screen.getByText('Cloud Armor policy summary')).toBeTruthy();
+  expect(screen.getByText('2 unique policies')).toBeTruthy();
+  expect(screen.getByText('1 service')).toBeTruthy();
+  expect(screen.getByText('1 service · 1 policy')).toBeTruthy();
+  expect(screen.getByText('1 unique policy has at least one preview rule. Preview rules are evaluated but do not enforce their action.')).toBeTruthy();
+});
+
 test('permission verification enables scanning and editing the scope invalidates it', async () => {
   streamPermissions.mockResolvedValue({ all_permissions_granted: true, permissions: [] });
   streamScan.mockResolvedValue({ ...state.scanResult, status: 'completed' });
   render(<App />);
   await screen.findByLabelText('Project ID');
+  expect(screen.queryByRole('list', { name: 'Required project permissions' })).toBeNull();
+  expect(screen.getByText('SETUP CHECKLIST')).toBeTruthy();
+  expect(screen.getByText('Verify access')).toBeTruthy();
   await waitFor(() => expect(screen.getByLabelText('Cloud connection').value).toBe('gcp-1'));
   fireEvent.change(screen.getByLabelText('Project ID'), { target: { value: 'demo-project' } });
   fireEvent.click(screen.getByText('Check permissions'));
@@ -32,6 +104,31 @@ test('permission verification enables scanning and editing the scope invalidates
   expect(streamScan).toHaveBeenCalledWith('demo-project', 'gcp-1', expect.any(Function));
   fireEvent.change(screen.getByLabelText('Project ID'), { target: { value: 'other-project' } });
   expect(screen.getByText('Start scan').disabled).toBe(true);
+});
+
+test('folder scan uses recursive scope scan without project-only preflight', async () => {
+  streamScopeScan.mockResolvedValue({
+    project_id: '123456789',
+    scope_type: 'folder',
+    status: 'completed',
+    message: 'Scanned 1 project.',
+    project_ids: ['child-project'],
+    scanned_project_ids: ['child-project'],
+    load_balancers: [],
+  });
+  render(<App />);
+  await waitFor(() => expect(screen.getByLabelText('Cloud connection').value).toBe('gcp-1'));
+  fireEvent.change(screen.getByLabelText('Scope type'), { target: { value: 'folder' } });
+  expect(screen.getByLabelText('Folder ID')).toBeTruthy();
+  fireEvent.change(screen.getByLabelText('Folder ID'), { target: { value: '123456789' } });
+  fireEvent.click(screen.getByText('Start scan'));
+  await waitFor(() => expect(streamScopeScan).toHaveBeenCalledWith(
+    'folder',
+    '123456789',
+    'gcp-1',
+    expect.any(Function),
+  ));
+  expect(streamPermissions).not.toHaveBeenCalled();
 });
 test('waterfall keeps names compact, expands and collapses, filters policies and opens details', () => {
   const onSelect = vi.fn();

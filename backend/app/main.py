@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import logging
 import queue
 import threading
 
@@ -13,6 +14,7 @@ from app.models.schemas import (
     CheckLbPermissionsResponse,
     PermissionManifestEntry,
     PermissionManifestResponse,
+    ScopeScanRequest,
     ScanResponse,
 )
 from app.config import settings
@@ -21,6 +23,9 @@ from app.connections import router as connections_router, scan_credentials
 from app.services.lb_permission_checker import LbPermissionChecker
 from app.services.permission_preflight import DEFAULT_MANIFEST_PATH, load_permission_manifest
 from app.services.scan_orchestrator import ScanOrchestrator, build_preflight_response
+from app.services.scope_scan import ScopeScanOrchestrator
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="CloudScanner GCP LB Permission Checker",
@@ -72,6 +77,49 @@ def get_permission_manifest() -> PermissionManifestResponse:
 
 def _build_check_response(result) -> CheckLbPermissionsResponse:
     return build_preflight_response(result)
+
+
+@app.post("/api/v1/scan/scope/stream", dependencies=[Depends(require_scanner_user)])
+def scan_scope_stream(
+    body: ScopeScanRequest,
+    identity=Depends(scan_credentials),
+) -> StreamingResponse:
+    log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def on_log(message: str) -> None:
+        log_queue.put(("log", message))
+
+    def run_scan() -> None:
+        try:
+            result = ScopeScanOrchestrator(*identity).run(
+                body.scope_type,
+                body.scope_id,
+                on_log=on_log,
+            )
+            log_queue.put(("result", result))
+        except Exception:
+            logger.exception(
+                "Folder/organization scan failed for %s %s",
+                body.scope_type,
+                body.scope_id,
+            )
+            log_queue.put(("error", "Failed to scan this scope. Check folder access and project permissions."))
+
+    threading.Thread(target=run_scan, daemon=True).start()
+
+    def event_stream():
+        while True:
+            event_type, payload = log_queue.get()
+            if event_type == "log":
+                yield f"data: {json.dumps({'type': 'log', 'message': payload})}\n\n"
+            elif event_type == "result":
+                yield f"data: {json.dumps({'type': 'result', 'data': payload.model_dump()})}\n\n"
+                break
+            elif event_type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': payload})}\n\n"
+                break
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/api/v1/scan/{project_id}", response_model=ScanResponse, dependencies=[Depends(require_scanner_user)])

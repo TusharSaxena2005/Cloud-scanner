@@ -17,6 +17,7 @@ export default function Dashboard({ state, user, onInspectResource }) {
   const hasResults = !!state.scanResult;
 
   const uniquePolicies = new Set();
+  const edgePolicies = new Set();
   const previewPolicies = new Set();
   if (state.scanResult?.load_balancers) {
     for (const lb of state.scanResult.load_balancers) {
@@ -30,10 +31,12 @@ export default function Dashboard({ state, user, onInspectResource }) {
         }
         if (entry.edge_security_policy?.name) {
           uniquePolicies.add(entry.edge_security_policy.name);
+          edgePolicies.add(entry.edge_security_policy.name);
         }
       }
     }
   }
+  const edgePolicyServices = backends.filter(item => item.backendNode?.edge_security_policy?.name && !item.backendNode.edge_security_policy.error).length;
 
   return (
     <div className="dashboard-page">
@@ -156,7 +159,21 @@ export default function Dashboard({ state, user, onInspectResource }) {
                         <button
                           type="button"
                           className="btn ghost small"
-                          onClick={() => onInspectResource(item.backendNode.backend_service)}
+                          onClick={() => onInspectResource({
+                            type: 'Backend Service',
+                            name: item.backendNode.backend_service.name || item.backendService,
+                            status: item.status,
+                            details: item.backendNode.backend_service,
+                            chain: [
+                              ['Project', item.project],
+                              ['Load Balancer', item.loadBalancer],
+                              ['Forwarding Rule', item.forwardingRule],
+                              ['Target Proxy', item.hierarchy.target_proxy?.name],
+                              ['URL Map', item.hierarchy.url_map?.name],
+                              ['Backend Service', item.backendService],
+                              ['Cloud Armor Policy', item.cloudArmorPolicy],
+                            ],
+                          })}
                         >
                           Inspect
                         </button>
@@ -176,40 +193,40 @@ export default function Dashboard({ state, user, onInspectResource }) {
             <section className="panel">
               <div className="panel-header">
                 <div>
-                  <h2>WAF & Edge Policy Coverage</h2>
-                  <p className="panel-subtitle">Distribution of security controls safeguarding ingress traffic.</p>
+                  <h2>Cloud Armor policy summary</h2>
+                  <p className="panel-subtitle">Policy names and backend services found in this scan. These counts measure different things.</p>
                 </div>
-                <span className="quiet-badge">{uniquePolicies.size} Policies</span>
+                <span className="quiet-badge">{uniquePolicies.size} unique policies</span>
               </div>
 
               <div className="policy-stats-list">
                 <div className="policy-stat-row">
                   <div>
-                    <strong>Standard Cloud Armor Backend Policies</strong>
-                    <p className="panel-note" style={{ margin: 0 }}>Layer 7 WAF inspection applied to backend services.</p>
+                    <strong>Backend services with a policy</strong>
+                    <p className="panel-note" style={{ margin: 0 }}>Services with a Cloud Armor backend policy attached. This counts services, not unique policies.</p>
                   </div>
-                  <span className="stat-pill">{protectedList.filter(p => p.cloudArmorPolicy !== 'No Policy').length} applied</span>
+                  <span className="stat-pill">{protectedList.length} {protectedList.length === 1 ? 'service' : 'services'}</span>
                 </div>
 
                 <div className="policy-stat-row">
                   <div>
-                    <strong>Cloud Armor Edge Policies (CDN)</strong>
-                    <p className="panel-note" style={{ margin: 0 }}>Protection evaluated at Google Cloud edge cache locations.</p>
+                    <strong>Backend services with an edge policy</strong>
+                    <p className="panel-note" style={{ margin: 0 }}>Services linked to a Cloud Armor edge policy. Counted separately from backend policies.</p>
                   </div>
                   <span className="stat-pill">
-                    {protectedList.filter(p => p.edgePolicy).length} edge policies
+                    {edgePolicyServices} {edgePolicyServices === 1 ? 'service' : 'services'} · {edgePolicies.size} {edgePolicies.size === 1 ? 'policy' : 'policies'}
                   </span>
                 </div>
 
                 {previewPolicies.size > 0 && (
                   <div className="policy-stat-row warn">
                     <div>
-                      <strong>Policies in Preview Mode</strong>
+                      <strong>Backend policies with preview rules</strong>
                       <p className="panel-note warn" style={{ margin: 0 }}>
-                        {previewPolicies.size} policy is running rules in preview/dry-run mode without blocking traffic.
+                        {previewPolicies.size} unique {previewPolicies.size === 1 ? 'policy has' : 'policies have'} at least one preview rule. Preview rules are evaluated but do not enforce their action.
                       </p>
                     </div>
-                    <span className="status-pill checking">PREVIEW</span>
+                    <span className="stat-pill">{previewPolicies.size} {previewPolicies.size === 1 ? 'policy' : 'policies'}</span>
                   </div>
                 )}
               </div>

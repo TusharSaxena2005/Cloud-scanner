@@ -17,15 +17,36 @@ test('GCP connection errors are recoverable and future providers are explicit', 
   expect(screen.getByText('AWS')).toBeTruthy();
   expect(screen.getByText('Azure')).toBeTruthy();
 });
-test('disconnect removes the selected connection and clears its scan results', async () => {
-  patchState({ ...state, scanResult: { project_id: 'private-project' }, preflight: { all_permissions_granted: true } });
+test('disconnect removes the selected connection but preserves previous scan results', async () => {
+  const previousResult = { project_id: 'private-project' };
+  patchState({
+    ...state,
+    scanResult: previousResult,
+    scanStatus: 'completed',
+    lastScanTime: '2026-11-05T18:00:00.000Z',
+    scanDurationMs: 1200,
+    preflight: { all_permissions_granted: true },
+  });
   disconnectCloud.mockResolvedValue({ ok: true });
   fetchConnections.mockResolvedValue({ connections: [] });
   render(<Connections state={state} />);
   fireEvent.click(screen.getByText('Disconnect'));
   await waitFor(() => expect(getState().connectionId).toBe(''));
-  expect(getState().scanResult).toBeNull();
+  expect(getState().scanResult).toEqual(previousResult);
+  expect(getState().scanStatus).toBe('completed');
+  expect(getState().lastScanTime).toBe('2026-11-05T18:00:00.000Z');
+  expect(getState().scanDurationMs).toBe(1200);
   expect(getState().preflight).toBeNull();
+});
+test('disconnecting an unselected connection does not clear scan results', async () => {
+  const previousResult = { project_id: 'private-project' };
+  patchState({ ...state, scanResult: previousResult });
+  disconnectCloud.mockResolvedValue({ ok: true });
+  fetchConnections.mockResolvedValue({ connections: [] });
+  render(<Connections state={{ ...state, connectionId: 'other-connection' }} />);
+  fireEvent.click(screen.getByText('Disconnect'));
+  await waitFor(() => expect(getState().connections).toEqual([]));
+  expect(getState().scanResult).toEqual(previousResult);
 });
 test('changing connections invalidates preflight and pending scan results', () => {
   patchState({ preflight: { all_permissions_granted: true }, scanResult: { private: true } });

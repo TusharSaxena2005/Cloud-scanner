@@ -26,6 +26,8 @@ router = APIRouter(prefix="/api", tags=["Cloud connections"])
 GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
 GCP_SCOPE = "https://www.googleapis.com/auth/cloud-platform.read-only"
+COMPUTE_READONLY_SCOPE = "https://www.googleapis.com/auth/compute.readonly"
+GCP_SCOPES = (GCP_SCOPE, COMPUTE_READONLY_SCOPE)
 LOGIN_SCOPES = {"openid", "email", "profile"}
 
 
@@ -139,7 +141,7 @@ def begin_oauth(purpose, request, db, user=None, workspace_id=None):
     db.commit()
     params = {"client_id": settings.google_client_id,
         "redirect_uri": settings.public_url.rstrip("/") + "/api/oauth/google/callback",
-        "response_type": "code", "scope": " ".join(sorted(LOGIN_SCOPES | ({GCP_SCOPE} if purpose == "gcp" else set()))),
+        "response_type": "code", "scope": " ".join(sorted(LOGIN_SCOPES | (set(GCP_SCOPES) if purpose == "gcp" else set()))),
         "state": state, "nonce": nonce,
         "code_challenge": base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode(),
         "code_challenge_method": "S256"}
@@ -235,7 +237,7 @@ def callback(request: Request, state: str = "", code: str = "", error: str = "",
         if claims["sub"] != user.google_sub:
             raise HTTPException(400, "Connect the same Google account you used to sign in.")
         scopes = set(tokens.get("scope", "").split())
-        if GCP_SCOPE not in scopes:
+        if not set(GCP_SCOPES).issubset(scopes):
             raise HTTPException(400, "Google Cloud read access was not granted. Reconnect and approve it.")
         connection = db.scalar(select(CloudConnection).where(CloudConnection.workspace_id == attempt.workspace_id,
             CloudConnection.provider == "gcp", CloudConnection.provider_subject == claims["sub"]))
@@ -264,7 +266,7 @@ def scan_credentials(connection_id: str, user=Depends(require_scanner_user), db=
     connection = connection_for_user(db, user, connection_id)
     data = unseal(connection.encrypted_credentials)
     credentials = Credentials(token=None, refresh_token=data["refresh_token"], token_uri=GOOGLE_TOKEN,
-        client_id=settings.google_client_id, client_secret=settings.google_client_secret, scopes=[GCP_SCOPE])
+        client_id=settings.google_client_id, client_secret=settings.google_client_secret, scopes=list(GCP_SCOPES))
     try:
         credentials.refresh(GoogleRequest())
     except GoogleAuthError:

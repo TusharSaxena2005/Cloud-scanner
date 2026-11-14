@@ -18,6 +18,11 @@ class CheckLbPermissionsRequest(BaseModel):
     )
 
 
+class ScopeScanRequest(BaseModel):
+    scope_type: Literal["folder", "organization"]
+    scope_id: str = Field(..., min_length=1, max_length=20, pattern=r"^\d+$")
+
+
 class PermissionCheckResult(BaseModel):
     permission: str
     status: PermissionStatusValue
@@ -63,19 +68,37 @@ class BackendServiceHierarchyResponse(BaseModel):
 
 class LoadBalancerHierarchyResponse(BaseModel):
     forwarding_rule: ResourceNodeResponse
+    project_id: str | None = None
     target_proxy: ResourceNodeResponse | None = None
     url_map: ResourceNodeResponse | None = None
     backend_services: list[BackendServiceHierarchyResponse] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
+class SkippedProjectResponse(BaseModel):
+    project_id: str
+    reason: str
+
+
+class SkippedScopeResponse(BaseModel):
+    resource: str
+    reason: str
+
+
 class ScanResponse(BaseModel):
     project_id: str
+    scope_type: Literal["project", "folder", "organization"] = "project"
+    scope_id: str | None = None
     status: ScanStatusValue
     message: str
     # Legacy response key; now contains the connected user identity.
     service_account_email: str
-    preflight: CheckLbPermissionsResponse
+    preflight: CheckLbPermissionsResponse | None = None
     project: ResourceNodeResponse | None = None
+    projects: list[ResourceNodeResponse] = Field(default_factory=list)
+    project_ids: list[str] = Field(default_factory=list)
+    scanned_project_ids: list[str] = Field(default_factory=list)
+    skipped_projects: list[SkippedProjectResponse] = Field(default_factory=list)
+    skipped_scopes: list[SkippedScopeResponse] = Field(default_factory=list)
     load_balancers: list[LoadBalancerHierarchyResponse] = Field(default_factory=list)
     logs: list[str] = Field(default_factory=list)
